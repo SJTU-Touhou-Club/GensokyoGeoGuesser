@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Gensokyo Geo-Guesser</title>
+    <link rel="stylesheet" href="/src/styles.css" />
+  </head>
+  <body>
+    <h1>Gensokyo Geo-Guesser</h1>
+    <div id="observe-banner">Spectating — read only</div>
+
+    <div id="game-area">
+      <div id="left-panel">
+        <div id="map-container">
+          <img id="map" src="/media/map_v2.jpg" alt="Gensokyo Map" />
+          <svg id="map-overlay" viewBox="0 0 100 100" preserveAspectRatio="none"></svg>
+        </div>
+        <div class="map-credit">
+          We give acknowledgement to MC幻想郷 circle for kindly sharing their map.
+        </div>
+      </div>
+
+      <div id="right-panel">
+        <h2 class="panel-title">
+          Round <span id="round-current" class="badge-round">?</span> /
+          <span id="round-max" class="badge-round secondary">?</span>
+          <span id="round-countdown" style="margin-left: auto; font-size: 24px">--:--</span>
+        </h2>
+        <div class="mult-box">
+          <span id="mult-label">Damage Multiplier</span>
+          <span id="dmg-mult" class="badge badge-accent">?x</span>
+        </div>
+        <div id="leaderboard"></div>
+        <div class="controls inline">
+          <button id="refmap-btn" type="button">reference map</button>
+        </div>
+        <div class="controls inline">
+          <button id="submit-btn" type="button" disabled>Submit</button>
+        </div>
+        <div id="question-container">
+          <img id="question-img" src="" alt="Question" />
+          <div id="question-comment" style="display: none"></div>
+          <div id="answer-info" style="display: none">
+            Answer: <span id="answer-name">--</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div id="ref-overlay">
+      <img src="/media/ref_map_v2.jpg" alt="Reference map" />
+    </div>
+
+    <div id="game-over-overlay">
+      <div class="result-panel">
+        <h2 class="panel-title result-title">Game Over</h2>
+        <div id="game-over-leaderboard" class="leaderboard-panel"></div>
+        <button id="back-lobby" class="btn-primary" type="button">Back to Lobby</button>
+      </div>
+    </div>
+
+    <div id="debug-panel" class="collapsed">
+      <div class="debug-controls">
+        <button type="button" class="debug-toggle">Toggle log</button>
+        <button type="button" id="debug-pause">Pause scroll</button>
+        <button type="button" id="debug-prev">Prev round</button>
+        <button type="button" id="debug-next">Next round</button>
+        <button type="button" id="debug-reveal">Force reveal</button>
+      </div>
+      <div id="debug-log"></div>
+    </div>
+
+    <script type="module" src="/src/game.js"></script>
+  </body>
+</html>

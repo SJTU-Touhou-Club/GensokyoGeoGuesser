@@ -1,0 +1,14 @@
+{
+  "name": "gensokyo-geo-guesser-neo",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "devDependencies": {
+    "vite": "^2.9.18"
+  }
+}

@@ -1,0 +1,75 @@
+players:
+  min: 2
+  max: 8
+
+lobby:
+  countdown_seconds: 10
+  heartbeat_seconds: 5
+
+rounds:
+  max_rounds: 16
+  max_hp: 100.0
+
+data_files:
+  locations: locations_v2.csv
+  questions: questions_v2.csv
+
+timeouts:
+  place_guess: 30
+  agree_next: 10
+
+# --- HP: ffa damage (active) ---
+# scoring:
+#   mode: hp
+#   damage_fn: ffa
+#   distance_scale: 50
+#   tie_threshold: 0.1
+#   end_on_hp_zero: true
+
+# --- HP: ranking damage (comment out block above, uncomment below) ---
+# scoring:
+#   mode: hp
+#   damage_fn: ranking
+#   distance_scale: 50
+#   rank_tolerance: 3.0
+#   tie_threshold: 0.1
+#   end_on_hp_zero: true
+#   ranking:
+#     hp_budget_factor: 0.22
+#     player_scale: true
+
+# --- Points mode (comment out block above, uncomment below) ---
+# scoring:
+#   mode: points
+#   scoring_fn: ffa
+#   distance_scale: 50
+#   score_cap: 50.0
+#   rank_tolerance: 3.0
+#   tie_threshold: 0.1
+
+scoring:
+  mode: points
+  scoring_fn: ranking
+  distance_scale: 1
+  rank_tolerance: 0.05
+  tie_threshold: 0.1
+
+dmg_mult_schedule:
+  - { rounds: 10, mult: 1.0 }
+  - { rounds: 4, mult: 1.5 }
+  - { rounds: 999, mult: 2.0 }
+
+pin_colors:
+  - "#5557EE"
+  - "#EE5755"
+  - "#57EE55"
+  - "#EEAA55"
+  - "#AA55EE"
+  - "#55EEAA"
+  - "#EE55AA"
+  - "#55AAEE"
+  - "#EEEE55"
+  - "#EE5555"
+
+debug:
+  enabled: false

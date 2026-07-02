@@ -1,1 +1,12 @@
-ref/
+# Neo implementation (see docs/)
+
+__pycache__/
+*.pyc
+.pytest_cache/
+frontend/node_modules/
+frontend/package-lock.json
+
+# Generated at install time (see install.sh)
+static/dataset/
+static/media/
+static/dist/

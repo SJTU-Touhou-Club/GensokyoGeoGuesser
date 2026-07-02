@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Gensokyo Geo-Guesser | Lobby</title>
+    <style>
+      body {
+        font-family: system-ui, sans-serif;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 100vh;
+        margin: 0;
+        background: url("/media/lobby_background.png") center / cover no-repeat fixed;
+      }
+      .card {
+        background: rgba(255, 255, 255, 0.85);
+        padding: 24px;
+        border-radius: 12px;
+        box-shadow: 0 8px 30px rgba(0, 0, 0, 0.2);
+        width: min(520px, 92vw);
+        position: absolute;
+        top: 18vh;
+        left: 50%;
+        transform: translateX(-50%);
+      }
+      h1 {
+        margin: 0 0 18px;
+        font-size: 20px;
+      }
+      .row {
+        display: flex;
+        gap: 10px;
+        margin: 10px 0;
+        align-items: center;
+      }
+      .row.actions {
+        justify-content: space-between;
+      }
+      .actions-right {
+        display: flex;
+        gap: 10px;
+        justify-content: flex-end;
+      }
+      .row label {
+        min-width: 90px;
+        font-weight: 600;
+      }
+      input[type="text"],
+      input[type="number"] {
+        flex: 1;
+        padding: 10px;
+        border: 1px solid #ddd;
+        border-radius: 8px;
+      }
+      .btn {
+        padding: 10px 14px;
+        border-radius: 10px;
+        border: 2px solid #ddd;
+        background: #fff;
+        font-weight: 700;
+        cursor: pointer;
+      }
+      .btn.primary {
+        background: #5557ee;
+        color: #fff;
+        border-color: #5557ee;
+      }
+      .btn:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+      }
+      .btn.compact {
+        padding: 8px 12px;
+        font-size: 13px;
+        border-radius: 9px;
+        background: #f1f3f5;
+        border-color: #d6dbe1;
+        color: #3f454b;
+      }
+      .btn.compact:hover {
+        background: #e8ebef;
+      }
+      #status-bar {
+        display: none;
+        margin-top: 12px;
+        padding: 10px;
+        background: #fee2e2;
+        color: #991b1b;
+        border-radius: 8px;
+        font-size: 14px;
+      }
+      #waiting-room {
+        display: none;
+        margin-top: 16px;
+        padding-top: 16px;
+        border-top: 1px solid #ddd;
+      }
+      .host-only {
+        display: none;
+      }
+      #lobby-ref-overlay {
+        position: fixed;
+        inset: 0;
+        display: none;
+        align-items: center;
+        justify-content: center;
+        padding: 18px;
+        background: rgba(0, 0, 0, 0.45);
+        z-index: 30;
+      }
+      #lobby-ref-overlay.open {
+        display: flex;
+      }
+      #lobby-ref-overlay img {
+        max-width: min(900px, 96vw);
+        max-height: 88vh;
+        width: auto;
+        height: auto;
+        border-radius: 10px;
+        box-shadow: 0 12px 40px rgba(0, 0, 0, 0.35);
+      }
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <h1>Gensokyo Geo-Guesser | Lobby</h1>
+
+      <div id="form-area">
+        <div class="row">
+          <label for="player-id">Player ID</label>
+          <input id="player-id" type="text" placeholder="Your name" maxlength="32" />
+        </div>
+        <div class="row">
+          <label for="room-id">Room ID</label>
+          <input id="room-id" type="text" placeholder="Leave blank for quick match" />
+        </div>
+        <div class="row host-only" id="minmax-row">
+          <label>Min / Max</label>
+          <input id="min-players" type="number" min="1" max="10" value="2" style="width: 60px" />
+          <span>/</span>
+          <input id="max-players" type="number" min="1" max="10" value="8" style="width: 60px" />
+        </div>
+        <div class="row actions">
+          <button id="btn-refmap" class="btn compact" type="button">Ref Map</button>
+          <div class="actions-right">
+            <button id="btn-join" class="btn primary" type="button">Join</button>
+            <button id="btn-observe" class="btn" type="button">Observe</button>
+            <button id="btn-cancel" class="btn" type="button" style="display: none">Cancel</button>
+          </div>
+        </div>
+      </div>
+
+      <div id="waiting-room">
+        <div>Room: <strong id="wr-room"></strong></div>
+        <div>Host: <strong id="wr-host"></strong></div>
+        <div id="wr-players"></div>
+        <div id="wr-status" style="margin-top: 8px; color: #555"></div>
+        <button id="btn-start" class="btn primary host-only" type="button" style="margin-top: 12px; display: none">
+          Start Game Now
+        </button>
+      </div>
+
+      <div id="status-bar">
+        <span id="status-text"></span>
+        <button id="status-close" type="button" style="float: right">×</button>
+      </div>
+    </div>
+    <div id="lobby-ref-overlay">
+      <img src="/media/ref_map_v2.jpg" alt="Reference map" />
+    </div>
+
+    <script type="module" src="/src/lobby.js"></script>
+  </body>
+</html>
