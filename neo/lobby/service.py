@@ -6,7 +6,19 @@ import threading
 import time
 from typing import Callable, Dict, List, Optional
 
-from neo.config import get_config
+from neo.config import (
+    default_scoring_mode,
+    get_config,
+    get_scoring_mode_config,
+    list_scoring_modes,
+    resolve_scoring_mode_name,
+)
+from neo.defs import (
+    default_difficulty,
+    default_rounds,
+    exposed_difficulties,
+    round_bounds,
+)
 from neo.game import database as game_db
 from neo.lobby.store import (
     LobbyPlayer,
@@ -64,6 +76,18 @@ def player_limits_meta() -> dict:
     return {"min": lo, "max": hi}
 
 
+def game_settings_meta() -> dict:
+    r_lo, r_hi = round_bounds()
+    modes = list_scoring_modes()
+    return {
+        "rounds": {"min": r_lo, "max": r_hi, "default": default_rounds()},
+        "difficulties": list(exposed_difficulties()),
+        "default_difficulty": default_difficulty(),
+        "scoring_strategies": modes,
+        "default_scoring_strategy": default_scoring_mode(),
+    }
+
+
 def normalize_room_limits(
     min_players: int,
     max_players: int,
@@ -85,13 +109,68 @@ def normalize_room_limits(
     return min_p, max_p
 
 
+def normalize_rounds(rounds) -> int:
+    lo, hi = round_bounds()
+    try:
+        value = int(rounds)
+    except (TypeError, ValueError):
+        raise LobbyError("INVALID_ROUNDS", 400)
+    if not (lo <= value <= hi):
+        raise LobbyError("INVALID_ROUNDS", 400)
+    return value
+
+
+def normalize_difficulty(difficulty) -> str:
+    if difficulty is None:
+        return default_difficulty()
+    value = str(difficulty).strip().upper()
+    if value not in exposed_difficulties():
+        raise LobbyError("INVALID_DIFFICULTY", 400)
+    return value
+
+
+def normalize_scoring_strategy(strategy) -> str:
+    if strategy is None:
+        return default_scoring_mode()
+    try:
+        return resolve_scoring_mode_name(str(strategy).strip())
+    except KeyError:
+        raise LobbyError("INVALID_SCORING_STRATEGY", 400)
+
+
+def _build_room_scoring_config(scoring_strategy: str) -> dict:
+    """Snapshot the selected mode's full hyperparameter block onto the room."""
+    return get_scoring_mode_config(scoring_strategy)
+
+
+def _ensure_living_host(room: LobbyRoom) -> bool:
+    """Reassign host_id if the current host is not among room.players.
+
+    Returns True if host_id changed.
+    """
+    if not room.players:
+        if room.host_id:
+            room.host_id = ""
+            return True
+        return False
+    living = {p.player_id for p in room.players}
+    if room.host_id in living:
+        return False
+    room.host_id = room.player_ids_ordered()[0]
+    return True
+
+
 def _room_update_payload(room: LobbyRoom) -> dict:
     return {
+        "host_id": room.host_id,
         "players": room.to_dict()["players"],
         "spectators": room.to_dict()["spectators"],
         "status": room.status.value,
         "min_players": room.min_players,
         "max_players": room.max_players,
+        "rounds": room.rounds,
+        "difficulty": room.difficulty,
+        "scoring_strategy": room.scoring_strategy,
         "countdown_deadline": room.countdown_deadline,
         "countdown_remaining_seconds": room.countdown_remaining_seconds(),
     }
@@ -103,6 +182,9 @@ def join(
     connection_id: str,
     min_players: Optional[int] = None,
     max_players: Optional[int] = None,
+    rounds: Optional[int] = None,
+    difficulty: Optional[str] = None,
+    scoring_strategy: Optional[str] = None,
 ) -> dict:
     if not validate_player_id(player_id):
         raise LobbyError("INVALID_PLAYER_ID", 400)
@@ -113,6 +195,13 @@ def join(
     min_p = min_players if min_players is not None else cfg_min
     max_p = max_players if max_players is not None else cfg_max
     min_p, max_p = normalize_room_limits(min_p, max_p)
+    room_rounds = normalize_rounds(rounds if rounds is not None else default_rounds())
+    room_difficulty = normalize_difficulty(
+        difficulty if difficulty is not None else default_difficulty()
+    )
+    room_strategy = normalize_scoring_strategy(
+        scoring_strategy if scoring_strategy is not None else None
+    )
 
     existing = store.get_player_room(player_id)
     if existing and existing != room_id:
@@ -132,6 +221,9 @@ def join(
                 host_id=player_id,
                 min_players=min_p,
                 max_players=max_p,
+                rounds=room_rounds,
+                difficulty=room_difficulty,
+                scoring_strategy=room_strategy,
             )
             store.save_room(room)
             if is_quick:
@@ -158,6 +250,7 @@ def join(
         player.connected = True
         player.last_heartbeat = time.time()
         store.set_player_room(player_id, room_id, "player")
+        _ensure_living_host(room)
         store.save_room(room)
 
         _evaluate_waiting(room)
@@ -251,10 +344,12 @@ def leave(room_id: str, player_id: str, connection_id: str) -> dict:
                 if not s.connection_ids:
                     room.spectators.remove(s)
                     store.set_player_room(player_id, None, "spectator")
-        if removed and room.status == LobbyStatus.COUNTDOWN:
-            if len(room.players) < room.min_players:
-                room.status = LobbyStatus.WAITING
-                room.countdown_deadline = None
+        if removed:
+            _ensure_living_host(room)
+            if room.status == LobbyStatus.COUNTDOWN:
+                if len(room.players) < room.min_players:
+                    room.status = LobbyStatus.WAITING
+                    room.countdown_deadline = None
         store.save_room(room)
         if removed:
             _emit(room_id, "lobby_update", _room_update_payload(room))
@@ -287,6 +382,9 @@ def update_room_settings(
     player_id: str,
     min_players: int,
     max_players: int,
+    rounds=None,
+    difficulty=None,
+    scoring_strategy=None,
 ) -> dict:
     store = get_lobby_store()
     with store.acquire_lock(room_id):
@@ -303,6 +401,12 @@ def update_room_settings(
         )
         room.min_players = min_p
         room.max_players = max_p
+        if rounds is not None:
+            room.rounds = normalize_rounds(rounds)
+        if difficulty is not None:
+            room.difficulty = normalize_difficulty(difficulty)
+        if scoring_strategy is not None:
+            room.scoring_strategy = normalize_scoring_strategy(scoring_strategy)
         if room.status == LobbyStatus.COUNTDOWN and n < min_p:
             room.status = LobbyStatus.WAITING
             room.countdown_deadline = None
@@ -315,6 +419,7 @@ def update_room_settings(
         return {
             "ok": True,
             "player_limits": player_limits_meta(),
+            "game_settings": game_settings_meta(),
             "room": d,
         }
 
@@ -352,23 +457,29 @@ def room_status(room_id: str) -> dict:
     d = room.to_dict()
     d["countdown_remaining_seconds"] = room.countdown_remaining_seconds()
     d["player_limits"] = player_limits_meta()
+    d["game_settings"] = game_settings_meta()
     return d
 
 
 def _prune_stale_connections(room: LobbyRoom, timeout: float) -> None:
     now = time.time()
+    removed = False
     for p in list(room.players):
         stale = [c for c in p.connection_ids if now - p.last_heartbeat > timeout]
         for c in stale:
             p.connection_ids.discard(c)
         if not p.connection_ids:
             room.players.remove(p)
+            removed = True
             _emit(room.room_id, "player_left", {"player_id": p.player_id})
         else:
             p.connected = True
+    host_changed = _ensure_living_host(room) if removed else False
     if room.status == LobbyStatus.COUNTDOWN and len(room.players) < room.min_players:
         room.status = LobbyStatus.WAITING
         room.countdown_deadline = None
+    if removed or host_changed:
+        _emit(room.room_id, "lobby_update", _room_update_payload(room))
 
 
 def _evaluate_waiting(room: LobbyRoom) -> None:
@@ -401,7 +512,10 @@ def _begin_starting(room: LobbyRoom) -> None:
     room_config = {
         "min_players": room.min_players,
         "max_players": room.max_players,
-        "scoring": get_config()["scoring"],
+        "rounds": room.rounds,
+        "difficulty": room.difficulty,
+        "scoring_strategy": room.scoring_strategy,
+        "scoring": _build_room_scoring_config(room.scoring_strategy),
     }
     game_db.init_room(room.room_id, player_ids, room_config)
     room.status = LobbyStatus.IN_GAME
@@ -433,6 +547,7 @@ def _build_join_response(
         "role": role,
         "is_host": is_host,
         "player_limits": player_limits_meta(),
+        "game_settings": game_settings_meta(),
         "sse_url": f"/events/lobby/{room.room_id}?player_id={player_id}",
         "room": d,
     }

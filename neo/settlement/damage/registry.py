@@ -2,9 +2,27 @@ from __future__ import annotations
 
 from typing import Dict
 
-from neo.config import get_config
+from neo.config import get_config, get_scoring_mode_config
 from neo.scoring.rank import rank_by_distance
 from neo.settlement.context import SettlementContext
+
+
+def _scoring_cfg(context: SettlementContext) -> dict:
+    room_scoring = context.get("config", {}).get("scoring")
+    if isinstance(room_scoring, dict) and (
+        "scoring_fn" in room_scoring
+        or "damage_fn" in room_scoring
+        or "mode" in room_scoring
+        or "distance_scale" in room_scoring
+    ):
+        return room_scoring
+    return get_scoring_mode_config()
+
+
+def _normalized(context: SettlementContext) -> Dict[str, float]:
+    if "normalized_distances" in context and context["normalized_distances"]:
+        return context["normalized_distances"]
+    return context["distances"]
 
 
 def ffa(context: SettlementContext) -> Dict[str, float]:
@@ -17,12 +35,16 @@ def ffa(context: SettlementContext) -> Dict[str, float]:
 
 def ranking(context: SettlementContext) -> Dict[str, float]:
     cfg = get_config()
-    scoring = cfg["scoring"]
+    scoring = _scoring_cfg(context)
     ranking_cfg = scoring.get("ranking", {})
 
-    tolerance = float(scoring.get("rank_tolerance", 3.0))
+    # Tolerance is applied in normalized distance units (scale-invariant).
+    tolerance = float(scoring.get("rank_tolerance", 0.02))
     max_hp = float(cfg["rounds"]["max_hp"])
-    max_rounds = int(cfg["rounds"]["max_rounds"])
+    max_rounds = int(
+        context.get("config", {}).get("rounds")
+        or cfg["rounds"]["max_rounds"]
+    )
     hp_budget_factor = float(ranking_cfg.get("hp_budget_factor", 0.22))
     player_scale = bool(ranking_cfg.get("player_scale", True))
     dmg_mult = context["dmg_mult"]
@@ -35,7 +57,7 @@ def ranking(context: SettlementContext) -> Dict[str, float]:
     if player_scale:
         hp_budget *= 2.0 / n
 
-    ranks = rank_by_distance(context["distances"], tolerance)
+    ranks = rank_by_distance(_normalized(context), tolerance)
 
     damages: Dict[str, float] = {}
     for pid in context["player_ids"]:
@@ -50,6 +72,7 @@ _REGISTRY = {
     "ffa": ffa,
     "ranking": ranking,
     "ffa_hp": ffa,
+    "distance": ffa,
 }
 
 

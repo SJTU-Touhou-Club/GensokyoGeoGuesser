@@ -9,13 +9,15 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Dict, List, Optional, Set
 
-from neo.config import data_dir, get_config, static_dir
+from neo.config import data_dir, get_config, get_scoring_mode_config, is_scoring_mode_body
 from neo.defs import (
     Coord,
     Question,
+    difficulty_at_most,
     get_category_sampler,
     get_dmg_mult_selector,
     get_question_sampler,
+    known_difficulty,
     room_seed,
 )
 
@@ -114,6 +116,28 @@ def _data_sheet_paths() -> tuple[str, str]:
     return str(data_dir() / loc_name), str(data_dir() / que_name)
 
 
+def room_max_rounds(room: RoomState) -> int:
+    rounds = room.room_config.get("rounds")
+    if rounds is not None:
+        return int(rounds)
+    return int(get_config()["rounds"]["max_rounds"])
+
+
+def room_difficulty(room: RoomState) -> str:
+    return str(room.room_config.get("difficulty") or get_config().get("difficulty", {}).get("default", "N"))
+
+
+def room_scoring_config(room: RoomState) -> dict:
+    scoring = room.room_config.get("scoring")
+    if is_scoring_mode_body(scoring):
+        return scoring
+    strategy = room.room_config.get("scoring_strategy")
+    try:
+        return get_scoring_mode_config(strategy)
+    except KeyError:
+        return get_scoring_mode_config()
+
+
 def init_database() -> None:
     loc_db.clear()
     que_db.clear()
@@ -135,9 +159,16 @@ def init_database() -> None:
             if len(parts) < 4:
                 continue
             id_str, image_filename, loc, category = parts[:4]
-            comment = parts[4] if len(parts) >= 5 else None
+            try:
+                qid = int(id_str)
+            except ValueError:
+                # Skip header rows (e.g. ID,图片名称,...).
+                continue
+            if not known_difficulty(category):
+                continue
+            comment = parts[4] if len(parts) >= 5 and parts[4] else None
             image_path = os.path.join(que_image_dir, image_filename)
-            que_db[int(id_str)] = Question(
+            que_db[qid] = Question(
                 image_path=image_path,
                 location=loc,
                 category=category,
@@ -145,11 +176,50 @@ def init_database() -> None:
             )
 
 
+def questions_for_difficulty(max_cat: str) -> List[int]:
+    return [
+        idx
+        for idx, q in que_db.items()
+        if difficulty_at_most(q.category, max_cat)
+    ]
+
+
 def init_room(room_id: str, player_ids: List[str], room_config: dict) -> RoomState:
     cfg = get_config()
     seed = room_seed(room_id)
-    max_rounds = cfg["rounds"]["max_rounds"]
+    max_rounds = int(room_config.get("rounds") or cfg["rounds"]["max_rounds"])
     max_hp = cfg["rounds"]["max_hp"]
+    difficulty = str(room_config.get("difficulty") or cfg.get("difficulty", {}).get("default", "N"))
+    room_config = dict(room_config)
+    room_config.setdefault("rounds", max_rounds)
+    room_config.setdefault("difficulty", difficulty)
+    strategy = room_config.get("scoring_strategy")
+    if not is_scoring_mode_body(room_config.get("scoring")):
+        try:
+            from neo.config import resolve_scoring_mode_name
+
+            strategy = resolve_scoring_mode_name(strategy)
+        except KeyError:
+            from neo.config import default_scoring_mode
+
+            strategy = default_scoring_mode()
+        room_config["scoring_strategy"] = strategy
+        room_config["scoring"] = get_scoring_mode_config(strategy)
+    else:
+        room_config.setdefault(
+            "scoring_strategy", strategy or "default"
+        )
+
+    pool = questions_for_difficulty(difficulty)
+    if not pool:
+        raise RuntimeError(
+            f"No questions available for difficulty <= {difficulty}."
+        )
+    if len(pool) < max_rounds:
+        raise RuntimeError(
+            f"Question pool ({len(pool)}) smaller than rounds ({max_rounds}) "
+            f"for difficulty <= {difficulty}."
+        )
 
     room = RoomState(
         room_id=room_id,
@@ -185,24 +255,19 @@ def init_room(room_id: str, player_ids: List[str], room_config: dict) -> RoomSta
 def sample_question(room_id: str) -> Question:
     room = get_room(room_id)
     try:
-        if room.category_sampler is not None:
-            cat = next(room.category_sampler)
-            valid_ques = [
-                idx
-                for idx, q in que_db.items()
-                if q.category == cat and idx not in room.que_history
-            ]
-            if not valid_ques:
-                raise RuntimeError(f"No more valid questions for category {cat}.")
-            idx = next(room.question_sampler) % len(valid_ques)
-            idx = valid_ques[idx]
-            room.que_history.append(idx)
-            return que_db[idx]
-        idx = next(room.question_sampler)
-        if idx in room.que_history:
-            raise RuntimeError(f"Question index {idx} already used.")
-        if idx not in que_db:
-            raise RuntimeError(f"Question index {idx} out of bounds.")
+        max_cat = room_difficulty(room)
+        valid_ques = [
+            idx
+            for idx, q in que_db.items()
+            if difficulty_at_most(q.category, max_cat)
+            and idx not in room.que_history
+        ]
+        if not valid_ques:
+            raise RuntimeError(
+                f"No more valid questions for difficulty <= {max_cat}."
+            )
+        idx = next(room.question_sampler) % len(valid_ques)
+        idx = valid_ques[idx]
         room.que_history.append(idx)
         return que_db[idx]
     except StopIteration:
@@ -211,8 +276,7 @@ def sample_question(room_id: str) -> Question:
 
 @room_lock_guard
 def get_question_at(target_index: int, room_id: str) -> Question:
-    cfg = get_config()
-    max_rounds = cfg["rounds"]["max_rounds"]
+    max_rounds = room_max_rounds(get_room(room_id))
     assert 0 <= target_index < max_rounds
     room = get_room(room_id)
     while len(room.que_history) <= target_index:
@@ -235,8 +299,8 @@ def get_dmg_mult(room_id: str) -> float:
 
 
 def has_next_round(room_id: str) -> bool:
-    cfg = get_config()
-    return get_room(room_id).round_index + 1 < cfg["rounds"]["max_rounds"]
+    room = get_room(room_id)
+    return room.round_index + 1 < room_max_rounds(room)
 
 
 def has_prev_round(room_id: str) -> bool:

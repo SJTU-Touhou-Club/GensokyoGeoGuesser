@@ -7,7 +7,7 @@ from neo.config import get_config, is_debug
 from neo.game import database as db
 from neo.game.database import Phase
 from neo.scoring.rank import assign_score_ranks, assign_standings_ranks
-from neo.settlement.mode import get_game_mode
+from neo.settlement.mode import get_game_mode, get_scoring_fn_name
 
 
 def build_state(
@@ -17,8 +17,12 @@ def build_state(
 ) -> Dict[str, Any]:
     room = db.get_room(room_id)
     cfg = get_config()
-    max_rounds = cfg["rounds"]["max_rounds"]
-    game_mode = get_game_mode()
+    max_rounds = db.room_max_rounds(room)
+    game_mode = get_game_mode(room.room_config)
+    scoring_strategy = room.room_config.get(
+        "scoring_strategy",
+        get_scoring_fn_name(room.room_config),
+    )
 
     question = db.get_current_question(room_id)
     answer_coord = db.loc_db.get(question.location)
@@ -60,6 +64,8 @@ def build_state(
     return {
         "state_version": room.state_version,
         "game_mode": game_mode,
+        "scoring_strategy": scoring_strategy,
+        "difficulty": db.room_difficulty(room),
         "phase": room.phase.value,
         "phase_remaining_seconds": remaining,
         "phase_deadline": phase_deadline,
@@ -106,7 +112,7 @@ def _filter_coords(
 
 
 def _build_players(room, revealed: bool, game_mode: str) -> List[dict]:
-    tie_threshold = get_config()["scoring"].get("tie_threshold", 0.1)
+    tie_threshold = db.room_scoring_config(room).get("tie_threshold", 0.1)
     entries = []
     for pid in room.player_ids:
         entry = {

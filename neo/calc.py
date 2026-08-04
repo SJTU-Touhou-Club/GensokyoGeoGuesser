@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from neo.defs import Coord
-from neo.config import get_config
+from neo.config import get_scoring_mode_config
 
 
 def distance(xy1: Coord, xy2: Coord) -> float:
@@ -11,7 +11,7 @@ def distance(xy1: Coord, xy2: Coord) -> float:
 
 
 def compute_scaled_distance(xy1: Coord, xy2: Coord) -> float:
-    scale = get_config()["scoring"]["distance_scale"]
+    scale = get_scoring_mode_config()["distance_scale"]
     return distance(xy1, xy2) * scale
 
 

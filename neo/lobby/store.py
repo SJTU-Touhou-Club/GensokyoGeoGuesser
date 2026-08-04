@@ -52,6 +52,9 @@ class LobbyRoom:
     host_id: str = ""
     min_players: int = 2
     max_players: int = 8
+    rounds: int = 6
+    difficulty: str = "N"
+    scoring_strategy: str = "ranking"
     countdown_deadline: Optional[float] = None
     players: List[LobbyPlayer] = field(default_factory=list)
     spectators: List[LobbySpectator] = field(default_factory=list)
@@ -67,6 +70,9 @@ class LobbyRoom:
             "host_id": self.host_id,
             "min_players": self.min_players,
             "max_players": self.max_players,
+            "rounds": self.rounds,
+            "difficulty": self.difficulty,
+            "scoring_strategy": self.scoring_strategy,
             "countdown_deadline": self.countdown_deadline,
             "players": [
                 {

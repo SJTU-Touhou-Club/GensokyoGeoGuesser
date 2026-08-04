@@ -4,6 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Gensokyo Geo-Guesser | Lobby</title>
+    <link rel="icon" href="/media/icon.svg" type="image/svg+xml" />
     <style>
       body {
         font-family: system-ui, sans-serif;
@@ -142,6 +143,20 @@
           <span>/</span>
           <input id="max-players" type="number" min="1" max="10" value="8" style="width: 60px" />
         </div>
+        <div class="row host-only" id="game-settings-row">
+          <label for="rounds">Rounds</label>
+          <input id="rounds" type="number" min="1" max="20" value="6" style="width: 60px" />
+          <label for="difficulty" style="min-width: auto; margin-left: 8px">Diff</label>
+          <select id="difficulty" style="padding: 8px; border-radius: 8px; border: 1px solid #ddd">
+            <option value="N">N</option>
+            <option value="L">L</option>
+          </select>
+          <label for="scoring-strategy" style="min-width: auto; margin-left: 8px">Score</label>
+          <select id="scoring-strategy" style="padding: 8px; border-radius: 8px; border: 1px solid #ddd; flex: 1">
+            <option value="ranking">Rank</option>
+            <option value="distance">Distance</option>
+          </select>
+        </div>
         <div class="row actions">
           <button id="btn-refmap" class="btn compact" type="button">Ref Map</button>
           <div class="actions-right">
@@ -168,7 +183,7 @@
       </div>
     </div>
     <div id="lobby-ref-overlay">
-      <img src="/media/ref_map_v2.jpg" alt="Reference map" />
+      <img data-src="/media/ref_map_v2.jpg" alt="Reference map" />
     </div>
 
     <script type="module" src="/src/lobby.js"></script>

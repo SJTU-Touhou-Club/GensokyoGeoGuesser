@@ -14,6 +14,9 @@ const ERROR_MESSAGES = {
   ROOM_NOT_FOUND: "Room not found.",
   INVALID_PLAYER_LIMITS: "Player limits must be between 1 and the number of pin colors, with min ≤ max.",
   MAX_BELOW_PLAYER_COUNT: "Max players cannot be below the current player count.",
+  INVALID_ROUNDS: "Rounds must be between the configured limits.",
+  INVALID_DIFFICULTY: "Selected difficulty is not available.",
+  INVALID_SCORING_STRATEGY: "Scoring must be ranking or distance.",
 };
 
 let evtSource = null;
@@ -24,14 +27,30 @@ let selfPlayerId = null;
 let isHost = false;
 let role = "player";
 let playerLimits = { min: 1, max: 10 };
-let lastRoomLimits = { min: 2, max: 8 };
-let syncingLimits = false;
+let gameSettings = {
+  rounds: { min: 1, max: 20, default: 6 },
+  difficulties: ["N", "L"],
+  default_difficulty: "N",
+  scoring_strategies: ["ranking", "distance"],
+  default_scoring_strategy: "ranking",
+};
+let lastRoomSettings = {
+  min: 2,
+  max: 8,
+  rounds: 6,
+  difficulty: "N",
+  scoring_strategy: "ranking",
+};
+let syncingSettings = false;
 
 const els = {
   playerId: document.getElementById("player-id"),
   roomId: document.getElementById("room-id"),
   minPlayers: document.getElementById("min-players"),
   maxPlayers: document.getElementById("max-players"),
+  rounds: document.getElementById("rounds"),
+  difficulty: document.getElementById("difficulty"),
+  scoringStrategy: document.getElementById("scoring-strategy"),
   join: document.getElementById("btn-join"),
   observe: document.getElementById("btn-observe"),
   refMap: document.getElementById("btn-refmap"),
@@ -58,15 +77,64 @@ function applyPlayerLimitBounds(limits) {
   els.maxPlayers.max = limits.max;
 }
 
-function syncLimitInputs(room) {
-  const min = room?.min_players ?? room?.min;
-  const max = room?.max_players ?? room?.max;
-  if (min == null || max == null) return;
-  syncingLimits = true;
-  els.minPlayers.value = min;
-  els.maxPlayers.value = max;
-  lastRoomLimits = { min, max };
-  syncingLimits = false;
+function applyGameSettings(settings) {
+  if (!settings) return;
+  gameSettings = { ...gameSettings, ...settings };
+  if (settings.rounds) {
+    els.rounds.min = settings.rounds.min;
+    els.rounds.max = settings.rounds.max;
+    if (!currentRoom) els.rounds.value = settings.rounds.default;
+  }
+  if (settings.difficulties) {
+    const current = els.difficulty.value;
+    els.difficulty.innerHTML = "";
+    for (const d of settings.difficulties) {
+      const opt = document.createElement("option");
+      opt.value = d;
+      opt.textContent = d;
+      els.difficulty.appendChild(opt);
+    }
+    const preferred =
+      settings.difficulties.includes(current)
+        ? current
+        : settings.default_difficulty || settings.difficulties[0];
+    if (preferred) els.difficulty.value = preferred;
+  }
+  if (settings.scoring_strategies) {
+    const current = els.scoringStrategy.value;
+    els.scoringStrategy.innerHTML = "";
+    for (const s of settings.scoring_strategies) {
+      const opt = document.createElement("option");
+      opt.value = s;
+      opt.textContent = s;
+      els.scoringStrategy.appendChild(opt);
+    }
+    const preferred =
+      settings.scoring_strategies.includes(current)
+        ? current
+        : settings.default_scoring_strategy || settings.scoring_strategies[0];
+    if (preferred) els.scoringStrategy.value = preferred;
+  }
+}
+
+function syncSettingsInputs(room) {
+  if (!room) return;
+  syncingSettings = true;
+  if (room.min_players != null) els.minPlayers.value = room.min_players;
+  if (room.max_players != null) els.maxPlayers.value = room.max_players;
+  if (room.rounds != null) els.rounds.value = room.rounds;
+  if (room.difficulty != null) els.difficulty.value = room.difficulty;
+  if (room.scoring_strategy != null) {
+    els.scoringStrategy.value = room.scoring_strategy;
+  }
+  lastRoomSettings = {
+    min: Number(els.minPlayers.value),
+    max: Number(els.maxPlayers.value),
+    rounds: Number(els.rounds.value),
+    difficulty: els.difficulty.value,
+    scoring_strategy: els.scoringStrategy.value,
+  };
+  syncingSettings = false;
 }
 
 function showError(code) {
@@ -78,7 +146,33 @@ document.getElementById("status-close")?.addEventListener("click", () => {
   els.statusBar.style.display = "none";
 });
 
+const MAP_CACHE_URLS = ["/media/map_v2.jpg", "/media/ref_map_v2.jpg"];
+
+function warmMapCache() {
+  for (const url of MAP_CACHE_URLS) {
+    const img = new Image();
+    if ("fetchPriority" in img) img.fetchPriority = "low";
+    img.decoding = "async";
+    img.src = url;
+  }
+}
+
+function ensureRefMapSrc() {
+  const img = els.refOverlay?.querySelector("img");
+  if (!img) return;
+  const src = img.dataset.src || "/media/ref_map_v2.jpg";
+  if (img.getAttribute("src") !== src) img.src = src;
+}
+
+// Low-priority warm so match → game hits HTTP cache instead of a map burst.
+if ("requestIdleCallback" in window) {
+  requestIdleCallback(() => warmMapCache(), { timeout: 2500 });
+} else {
+  setTimeout(warmMapCache, 1200);
+}
+
 els.refMap?.addEventListener("click", () => {
+  ensureRefMapSrc();
   els.refOverlay?.classList.add("open");
 });
 
@@ -143,6 +237,7 @@ function enterWaiting(data) {
   isHost = data.is_host;
   role = data.role;
   applyPlayerLimitBounds(data.player_limits);
+  applyGameSettings(data.game_settings);
   els.waiting.style.display = "block";
   els.cancel.style.display = "";
   els.join.disabled = true;
@@ -154,11 +249,13 @@ function enterWaiting(data) {
 
 function updateRoomUI(room) {
   if (!room) return;
-  if (room.host_id && selfPlayerId) {
+  if (selfPlayerId && Object.prototype.hasOwnProperty.call(room, "host_id")) {
     isHost = room.host_id === selfPlayerId;
   }
   els.wrRoom.textContent = room.room_id;
-  els.wrHost.textContent = room.host_id;
+  if (Object.prototype.hasOwnProperty.call(room, "host_id")) {
+    els.wrHost.textContent = room.host_id;
+  }
   const lines = (room.players || [])
     .map((p) => {
       const mark = p.player_id === room.host_id ? "*" : "";
@@ -166,7 +263,7 @@ function updateRoomUI(room) {
     })
     .join(", ");
   els.wrPlayers.textContent = `Players (${(room.players || []).length}/${room.max_players}): ${lines}`;
-  syncLimitInputs(room);
+  syncSettingsInputs(room);
 
   const status = room.status;
   const n = (room.players || []).length;
@@ -207,9 +304,13 @@ function connectLobbySSE(url) {
     const partial = JSON.parse(e.data);
     const room = {
       room_id: currentRoom,
-      host_id: els.wrHost.textContent,
+      host_id:
+        partial.host_id !== undefined ? partial.host_id : els.wrHost.textContent,
       min_players: partial.min_players,
       max_players: partial.max_players,
+      rounds: partial.rounds,
+      difficulty: partial.difficulty,
+      scoring_strategy: partial.scoring_strategy,
       players: partial.players,
       spectators: partial.spectators,
       status: partial.status,
@@ -234,7 +335,11 @@ function connectLobbySSE(url) {
         );
         fetch(`/api/lobby/room_status?room_id=${encodeURIComponent(currentRoom)}`)
           .then((r) => r.json())
-          .then(updateRoomUI)
+          .then((data) => {
+            if (data.game_settings) applyGameSettings(data.game_settings);
+            if (data.player_limits) applyPlayerLimitBounds(data.player_limits);
+            updateRoomUI(data);
+          })
           .catch(() => {});
       }
     }, reconnectDelay);
@@ -261,12 +366,15 @@ function startHeartbeat() {
 }
 
 async function pushRoomSettings() {
-  if (!currentRoom || !isHost || syncingLimits) return;
+  if (!currentRoom || !isHost || syncingSettings) return;
   const min_players = Number(els.minPlayers.value);
   const max_players = Number(els.maxPlayers.value);
+  const rounds = Number(els.rounds.value);
+  const difficulty = els.difficulty.value;
+  const scoring_strategy = els.scoringStrategy.value;
   if (max_players < min_players) {
     showError("INVALID_PLAYER_LIMITS");
-    syncLimitInputs(lastRoomLimits);
+    syncSettingsInputs(lastRoomSettings);
     return;
   }
   try {
@@ -275,11 +383,15 @@ async function pushRoomSettings() {
       player_id: selfPlayerId,
       min_players,
       max_players,
+      rounds,
+      difficulty,
+      scoring_strategy,
     });
     if (data.player_limits) applyPlayerLimitBounds(data.player_limits);
+    if (data.game_settings) applyGameSettings(data.game_settings);
     updateRoomUI(data.room);
   } catch (e) {
-    syncLimitInputs(lastRoomLimits);
+    syncSettingsInputs(lastRoomSettings);
     showError(e.code || e.error);
   }
 }
@@ -288,6 +400,15 @@ els.minPlayers.addEventListener("change", () => {
   pushRoomSettings();
 });
 els.maxPlayers.addEventListener("change", () => {
+  pushRoomSettings();
+});
+els.rounds.addEventListener("change", () => {
+  pushRoomSettings();
+});
+els.difficulty.addEventListener("change", () => {
+  pushRoomSettings();
+});
+els.scoringStrategy.addEventListener("change", () => {
   pushRoomSettings();
 });
 
@@ -303,6 +424,9 @@ els.join.addEventListener("click", async () => {
       connection_id: getConnectionId(),
       min_players: Number(els.minPlayers.value),
       max_players: Number(els.maxPlayers.value),
+      rounds: Number(els.rounds.value),
+      difficulty: els.difficulty.value,
+      scoring_strategy: els.scoringStrategy.value,
     });
     enterWaiting(data);
   } catch (e) {

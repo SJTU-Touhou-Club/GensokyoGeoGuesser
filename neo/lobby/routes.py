@@ -23,6 +23,9 @@ def join():
             connection_id=data.get("connection_id", ""),
             min_players=data.get("min_players"),
             max_players=data.get("max_players"),
+            rounds=data.get("rounds"),
+            difficulty=data.get("difficulty"),
+            scoring_strategy=data.get("scoring_strategy"),
         )
         return jsonify(result)
     except LobbyError as e:
@@ -76,6 +79,9 @@ def update_settings():
                 data.get("player_id", ""),
                 data.get("min_players"),
                 data.get("max_players"),
+                rounds=data.get("rounds"),
+                difficulty=data.get("difficulty"),
+                scoring_strategy=data.get("scoring_strategy"),
             )
         )
     except LobbyError as e:

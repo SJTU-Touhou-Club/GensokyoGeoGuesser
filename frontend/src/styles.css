@@ -404,8 +404,45 @@ h1 {
 @media (max-width: 800px) {
   #game-area {
     flex-direction: column;
+    align-items: center;
+  }
+  #left-panel {
+    width: 100%;
   }
   #right-panel {
-    max-width: none;
+    width: 100%;
+    max-width: 420px;
+    align-self: center;
+    align-items: center;
+    text-align: center;
+  }
+  #right-panel > * {
+    width: 100%;
+    margin-left: auto;
+    margin-right: auto;
+  }
+  #right-panel .panel-title {
+    justify-content: center;
+    flex-wrap: wrap;
+  }
+  #right-panel .panel-title #round-countdown {
+    margin-left: 0 !important;
+  }
+  #right-panel .mult-box {
+    justify-content: center;
+  }
+  #right-panel #question-container {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    order: 2;
+  }
+  #right-panel .controls.inline {
+    justify-content: center;
+    order: 1;
+  }
+  #right-panel #leaderboard {
+    order: 3;
+    text-align: left;
   }
 }

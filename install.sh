@@ -6,10 +6,21 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT"
 
-PY="${PYTHON:-python3}"
+SYS_PY="${PYTHON:-python3}"
+VENV="$ROOT/.venv"
 
-echo "[1/5] Installing Python dependencies..."
-"$PY" -m pip install -r requirements.txt
+# Create virtualenv if it does not exist yet.
+if [ ! -f "$VENV/bin/python" ]; then
+    echo "[venv] Creating virtualenv at $VENV ..."
+    "$SYS_PY" -m venv "$VENV"
+fi
+
+PY="$VENV/bin/python"
+PIP_INDEX_URL="${PIP_INDEX_URL:-https://mirrors.aliyun.com/pypi/simple/}"
+
+echo "[1/5] Installing Python dependencies (index: $PIP_INDEX_URL)..."
+"$PY" -m pip install --upgrade pip -i "$PIP_INDEX_URL"
+"$PY" -m pip install -r requirements.txt -i "$PIP_INDEX_URL"
 
 echo "[2/5] Installing frontend dependencies..."
 npm --prefix frontend install

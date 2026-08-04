@@ -32,7 +32,13 @@ def _cfg_timeouts() -> dict:
 
 
 def _scoring() -> dict:
-    return get_config()["scoring"]
+    from neo.config import get_scoring_mode_config
+
+    return get_scoring_mode_config()
+
+
+def _room_scoring(room: RoomState) -> dict:
+    return db.room_scoring_config(room)
 
 
 @room_lock_guard
@@ -186,25 +192,31 @@ def _enter_reveal(room_id: str) -> None:
         answer_coord = (0.5, 0.5)
 
     distances: Dict[str, float] = {}
+    normalized_distances: Dict[str, float] = {}
+    distance_scale = float(db.room_scoring_config(room).get("distance_scale", 1.0))
     for pid in room.player_ids:
         coord = room.player_coord.get(pid)
         if coord is not None:
-            distances[pid] = calc.compute_scaled_distance(coord, answer_coord)
+            raw = calc.distance(coord, answer_coord)
+            normalized_distances[pid] = raw
+            distances[pid] = raw * distance_scale
         else:
+            normalized_distances[pid] = 0.0
             distances[pid] = 0.0
 
     dmg_mult = db.get_dmg_mult(room_id)
     ctx: SettlementContext = {
         "distances": distances,
+        "normalized_distances": normalized_distances,
         "round_index": room.round_index,
         "dmg_mult": dmg_mult,
         "config": room.room_config,
         "player_ids": list(room.player_ids),
     }
 
-    game_mode = get_game_mode()
+    game_mode = get_game_mode(room.room_config)
     if game_mode == "points":
-        scoring_fn = get_scoring_fn(get_scoring_fn_name())
+        scoring_fn = get_scoring_fn(get_scoring_fn_name(room.room_config))
         round_scores = scoring_fn(ctx)
         for pid in room.player_ids:
             pts = round_scores.get(pid, 0.0)
@@ -214,7 +226,7 @@ def _enter_reveal(room_id: str) -> None:
             room_id, "info", f"Reveal round {room.round_index + 1}: {round_scores}"
         )
     else:
-        damage_fn = get_damage_fn(get_damage_fn_name())
+        damage_fn = get_damage_fn(get_damage_fn_name(room.room_config))
         damages = damage_fn(ctx)
         for pid in room.player_ids:
             dmg = damages.get(pid, 0.0)
@@ -267,9 +279,9 @@ def _afk_auto_guess(room: RoomState) -> None:
 
 
 def _should_end_game(room: RoomState) -> bool:
-    if get_game_mode() == "points":
+    if get_game_mode(room.room_config) == "points":
         return False
-    cfg = _scoring()
+    cfg = _room_scoring(room)
     if cfg.get("end_on_hp_zero", True):
         if any(room.player_hp.get(pid, 0) <= 0 for pid in room.player_ids):
             return True
@@ -291,8 +303,8 @@ def _enter_game_over(room_id: str) -> None:
 
 
 def _compute_rankings(room: RoomState) -> List[dict]:
-    tie_threshold = _scoring().get("tie_threshold", 0.1)
-    if get_game_mode() == "points":
+    tie_threshold = _room_scoring(room).get("tie_threshold", 0.1)
+    if get_game_mode(room.room_config) == "points":
         entries = []
         for pid in room.player_ids:
             entries.append(
