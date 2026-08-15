@@ -59,6 +59,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Gensokyo Geo-Guesser Neo")
     parser.add_argument("--debug", action="store_true")
     parser.add_argument("--port", type=int, default=5000)
+    parser.add_argument("--host", type=str, default="127.0.0.1")
     return parser.parse_args()
 
 
@@ -68,5 +69,5 @@ if __name__ == "__main__":
         set_debug_mode(True)
     tick_thread = threading.Thread(target=_lobby_tick, daemon=True)
     tick_thread.start()
-    print(f"Starting Neo server on port {args.port} (debug={args.debug})")
-    app.run(debug=args.debug, port=args.port, threaded=True)
+    print(f"Starting Neo server on port {args.host}:{args.port} (debug={args.debug})")
+    app.run(debug=args.debug, port=args.port, threaded=True, host=args.host)
