@@ -4,6 +4,7 @@ __pycache__/
 *.pyc
 .pytest_cache/
 .venv/
+/.envrc
 frontend/node_modules/
 frontend/package-lock.json
 
