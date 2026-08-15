@@ -11,3 +11,5 @@ frontend/package-lock.json
 static/dataset/
 static/media/
 static/dist/
+
+.DS_Store
