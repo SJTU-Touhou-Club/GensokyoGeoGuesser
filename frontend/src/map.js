@@ -12,112 +12,353 @@ export function createMapController(container, overlay, onPlaceGuess) {
   let observe = false;
   let clickable = true;
 
-  let scale = 1;
-  let panX = 0;
-  let panY = 0;
-  let panning = false;
-  let panStart = { x: 0, y: 0, panX: 0, panY: 0 };
+  const mapEl = container.querySelector("#map");
+  const mapSizer = container.querySelector("#map-sizer");
+  const mapContent = container.querySelector("#map-content");
+  if (!mapEl || !mapSizer || !mapContent) {
+    throw new Error("Map viewer structure is incomplete");
+  }
 
-  const layer = ensureMapLayer(container);
+  // Persistent scale is separate from temporary gesture state.
+  const viewerState = {
+    scale: MIN_ZOOM,
+    minScale: MIN_ZOOM,
+    maxScale: MAX_ZOOM,
+    baseWidth: 0,
+    baseHeight: 0,
+    viewportWidth: 0,
+    viewportHeight: 0,
+    frameId: 0,
+    panFrameId: 0,
+    pendingPanX: 0,
+    pendingPanY: 0,
+    clickUnlockAt: 0,
+    cursorViewport: null,
+    gesture: null,
+    ready: false,
+  };
 
-  function ensureMapLayer(root) {
-    let mapLayer = root.querySelector(".map-layer");
-    if (mapLayer) return mapLayer;
-    mapLayer = document.createElement("div");
-    mapLayer.className = "map-layer";
-    [...root.childNodes].forEach((node) => mapLayer.appendChild(node));
-    root.appendChild(mapLayer);
-    return mapLayer;
+  function clamp(value, min, max) {
+    return Math.min(Math.max(value, min), max);
+  }
+
+  function clampScrollLeft(scrollLeft, scale = viewerState.scale) {
+    const maxScroll = Math.max(
+      0,
+      viewerState.baseWidth * scale - viewerState.viewportWidth
+    );
+    return clamp(scrollLeft, 0, maxScroll);
+  }
+
+  function clampScrollTop(scrollTop, scale = viewerState.scale) {
+    const maxScroll = Math.max(
+      0,
+      viewerState.baseHeight * scale - viewerState.viewportHeight
+    );
+    return clamp(scrollTop, 0, maxScroll);
+  }
+
+  function updateMapAspectRatio() {
+    if (!mapEl.naturalWidth || !mapEl.naturalHeight) return;
+    container.style.aspectRatio = mapEl.naturalWidth + " / " + mapEl.naturalHeight;
+  }
+
+  function applyViewerScale(scale) {
+    mapSizer.style.width = viewerState.baseWidth * scale + "px";
+    mapSizer.style.height = viewerState.baseHeight * scale + "px";
+    mapContent.style.transform = "scale(" + scale + ")";
+  }
+
+  function syncViewerBaseSize() {
+    updateMapAspectRatio();
+
+    const nextViewportWidth = container.clientWidth;
+    const nextViewportHeight = container.clientHeight;
+    if (!nextViewportWidth || !nextViewportHeight) return;
+
+    let centerRatioX = 0.5;
+    let centerRatioY = 0.5;
+    if (viewerState.ready) {
+      const centerX = container.scrollLeft + viewerState.viewportWidth / 2;
+      const centerY = container.scrollTop + viewerState.viewportHeight / 2;
+      centerRatioX = clamp(
+        centerX / (viewerState.baseWidth * viewerState.scale),
+        0,
+        1
+      );
+      centerRatioY = clamp(
+        centerY / (viewerState.baseHeight * viewerState.scale),
+        0,
+        1
+      );
+    }
+
+    viewerState.viewportWidth = nextViewportWidth;
+    viewerState.viewportHeight = nextViewportHeight;
+    viewerState.baseWidth = nextViewportWidth;
+    viewerState.baseHeight = nextViewportHeight;
+    mapContent.style.width = viewerState.baseWidth + "px";
+    mapContent.style.height = viewerState.baseHeight + "px";
+    applyViewerScale(viewerState.scale);
+
+    if (viewerState.ready) {
+      const nextScrollLeft =
+        centerRatioX * viewerState.baseWidth * viewerState.scale -
+        viewerState.viewportWidth / 2;
+      const nextScrollTop =
+        centerRatioY * viewerState.baseHeight * viewerState.scale -
+        viewerState.viewportHeight / 2;
+      container.scrollLeft = clampScrollLeft(nextScrollLeft);
+      container.scrollTop = clampScrollTop(nextScrollTop);
+    } else {
+      container.scrollLeft = 0;
+      container.scrollTop = 0;
+    }
+
+    viewerState.ready = true;
+  }
+
+  function getViewportPoint(clientX, clientY) {
+    const rect = container.getBoundingClientRect();
+    return {
+      x: clamp(clientX - rect.left, 0, rect.width),
+      y: clamp(clientY - rect.top, 0, rect.height),
+    };
+  }
+
+  function isPointInsideViewer(clientX, clientY) {
+    const rect = container.getBoundingClientRect();
+    return (
+      clientX >= rect.left &&
+      clientX <= rect.right &&
+      clientY >= rect.top &&
+      clientY <= rect.bottom
+    );
+  }
+
+  function getContentPointFromViewport(
+    viewportX,
+    viewportY,
+    scale = viewerState.scale
+  ) {
+    return {
+      x: (container.scrollLeft + viewportX) / scale,
+      y: (container.scrollTop + viewportY) / scale,
+    };
+  }
+
+  function getGestureViewportPoint(event, fallback) {
+    if (
+      Number.isFinite(event.clientX) &&
+      Number.isFinite(event.clientY) &&
+      isPointInsideViewer(event.clientX, event.clientY)
+    ) {
+      return getViewportPoint(event.clientX, event.clientY);
+    }
+    return (
+      fallback ||
+      viewerState.cursorViewport || {
+        x: viewerState.viewportWidth / 2,
+        y: viewerState.viewportHeight / 2,
+      }
+    );
+  }
+
+  function isGestureInsideViewer(event) {
+    if (event.target instanceof Element && container.contains(event.target)) {
+      return true;
+    }
+    if (!Number.isFinite(event.clientX) || !Number.isFinite(event.clientY)) {
+      return false;
+    }
+    return isPointInsideViewer(event.clientX, event.clientY);
+  }
+
+  function renderGestureFrame() {
+    viewerState.frameId = 0;
+    const gesture = viewerState.gesture;
+    if (!gesture || !viewerState.ready) return;
+
+    // Read native scroll before writing the new scale.
+    const currentScale = viewerState.scale;
+    const nextScale = clamp(
+      gesture.startScale * gesture.latestScaleFactor,
+      viewerState.minScale,
+      viewerState.maxScale
+    );
+    const anchorViewportX = gesture.latestViewportX;
+    const anchorViewportY = gesture.latestViewportY;
+    const anchorContent = gesture.hasRendered
+      ? getContentPointFromViewport(anchorViewportX, anchorViewportY, currentScale)
+      : {
+          x:
+            gesture.startAnchorContentX +
+            (container.scrollLeft - gesture.startScrollLeft) / currentScale,
+          y:
+            gesture.startAnchorContentY +
+            (container.scrollTop - gesture.startScrollTop) / currentScale,
+        };
+    gesture.hasRendered = true;
+
+    if (Math.abs(nextScale - currentScale) > 1e-4) {
+      viewerState.scale = nextScale;
+      applyViewerScale(nextScale);
+      container.scrollLeft = clampScrollLeft(
+        anchorContent.x * nextScale - anchorViewportX,
+        nextScale
+      );
+      container.scrollTop = clampScrollTop(
+        anchorContent.y * nextScale - anchorViewportY,
+        nextScale
+      );
+    }
+
+    if (gesture.endRequested) {
+      viewerState.gesture = null;
+      container.classList.remove("gesture-active");
+      viewerState.clickUnlockAt = performance.now() + 160;
+    }
+  }
+
+  function scheduleGestureFrame() {
+    if (!viewerState.frameId) {
+      viewerState.frameId = requestAnimationFrame(renderGestureFrame);
+    }
+  }
+
+  function beginGesture(event) {
+    if (!viewerState.ready) syncViewerBaseSize();
+    if (!viewerState.ready) return;
+
+    const anchorViewport = getGestureViewportPoint(event);
+    const anchorContent = getContentPointFromViewport(
+      anchorViewport.x,
+      anchorViewport.y
+    );
+    viewerState.gesture = {
+      startScale: viewerState.scale,
+      startScrollLeft: container.scrollLeft,
+      startScrollTop: container.scrollTop,
+      startAnchorContentX: anchorContent.x,
+      startAnchorContentY: anchorContent.y,
+      latestScaleFactor: 1,
+      latestViewportX: anchorViewport.x,
+      latestViewportY: anchorViewport.y,
+      hasRendered: false,
+      endRequested: false,
+    };
+    container.classList.add("gesture-active");
+  }
+
+  function updateGesture(event) {
+    const gesture = viewerState.gesture;
+    if (!gesture) return;
+
+    const anchorViewport = getGestureViewportPoint(event, {
+      x: gesture.latestViewportX,
+      y: gesture.latestViewportY,
+    });
+    gesture.latestScaleFactor = Number.isFinite(event.scale) ? event.scale : 1;
+    gesture.latestViewportX = anchorViewport.x;
+    gesture.latestViewportY = anchorViewport.y;
+    scheduleGestureFrame();
+  }
+
+  function endGesture(event) {
+    const gesture = viewerState.gesture;
+    if (!gesture) return;
+
+    if (Number.isFinite(event.scale)) gesture.latestScaleFactor = event.scale;
+    const anchorViewport = getGestureViewportPoint(event, {
+      x: gesture.latestViewportX,
+      y: gesture.latestViewportY,
+    });
+    gesture.latestViewportX = anchorViewport.x;
+    gesture.latestViewportY = anchorViewport.y;
+    gesture.endRequested = true;
+    scheduleGestureFrame();
+  }
+
+  function renderDiagonalPanFrame() {
+    viewerState.panFrameId = 0;
+    const deltaX = viewerState.pendingPanX;
+    const deltaY = viewerState.pendingPanY;
+    viewerState.pendingPanX = 0;
+    viewerState.pendingPanY = 0;
+
+    if (!deltaX && !deltaY) return;
+    container.scrollLeft = clampScrollLeft(container.scrollLeft + deltaX);
+    container.scrollTop = clampScrollTop(container.scrollTop + deltaY);
+  }
+
+  function scheduleDiagonalPanFrame() {
+    if (!viewerState.panFrameId) {
+      viewerState.panFrameId = requestAnimationFrame(renderDiagonalPanFrame);
+    }
+  }
+
+  function wheelDeltaInPixels(event) {
+    if (event.deltaMode === 1) {
+      return { x: event.deltaX * 16, y: event.deltaY * 16 };
+    }
+    if (event.deltaMode === 2) {
+      return {
+        x: event.deltaX * viewerState.viewportWidth,
+        y: event.deltaY * viewerState.viewportHeight,
+      };
+    }
+    return { x: event.deltaX, y: event.deltaY };
+  }
+
+  function handleDiagonalPan(event) {
+    if (event.ctrlKey) return;
+
+    const maxScrollLeft = Math.max(
+      0,
+      viewerState.baseWidth * viewerState.scale - viewerState.viewportWidth
+    );
+    const maxScrollTop = Math.max(
+      0,
+      viewerState.baseHeight * viewerState.scale - viewerState.viewportHeight
+    );
+    if (maxScrollLeft <= 0 && maxScrollTop <= 0) return;
+
+    const delta = wheelDeltaInPixels(event);
+    if (!Number.isFinite(delta.x) || !Number.isFinite(delta.y)) return;
+    if (Math.abs(delta.x) < 0.01 || Math.abs(delta.y) < 0.01) return;
+
+    // Safari can lock native overflow scrolling to one axis.
+    event.preventDefault();
+    viewerState.pendingPanX += delta.x;
+    viewerState.pendingPanY += delta.y;
+    scheduleDiagonalPanFrame();
+  }
+
+  function handleWindowGesture(event) {
+    // Block Safari page zoom before routing the gesture.
+    event.preventDefault();
+
+    if (event.type === "gesturestart") {
+      if (isGestureInsideViewer(event)) beginGesture(event);
+      return;
+    }
+    if (!viewerState.gesture) return;
+    if (event.type === "gesturechange") {
+      updateGesture(event);
+      return;
+    }
+    endGesture(event);
+  }
+
+  function recordViewerCursor(event) {
+    if (isPointInsideViewer(event.clientX, event.clientY)) {
+      viewerState.cursorViewport = getViewportPoint(event.clientX, event.clientY);
+    }
   }
 
   function clearLines() {
     if (overlay) overlay.innerHTML = "";
   }
-
-  function applyTransform() {
-    layer.style.transform = `translate(${panX}px, ${panY}px) scale(${scale})`;
-  }
-
-  function clampPan() {
-    const cw = container.clientWidth;
-    const ch = container.clientHeight;
-    const lw = layer.offsetWidth * scale;
-    const lh = layer.offsetHeight * scale;
-    const minX = Math.min(0, cw - lw);
-    const minY = Math.min(0, ch - lh);
-    panX = Math.min(0, Math.max(minX, panX));
-    panY = Math.min(0, Math.max(minY, panY));
-  }
-
-  function zoomAt(clientX, clientY, nextScale) {
-    const rect = container.getBoundingClientRect();
-    const mx = clientX - rect.left;
-    const my = clientY - rect.top;
-    const lx = (mx - panX) / scale;
-    const ly = (my - panY) / scale;
-    scale = nextScale;
-    if (scale <= 1) {
-      scale = 1;
-      panX = 0;
-      panY = 0;
-    } else {
-      panX = mx - lx * scale;
-      panY = my - ly * scale;
-      clampPan();
-    }
-    applyTransform();
-  }
-
-  function resetZoom() {
-    scale = 1;
-    panX = 0;
-    panY = 0;
-    applyTransform();
-  }
-
-  container.addEventListener(
-    "wheel",
-    (e) => {
-      if (!container.contains(e.target)) return;
-      e.preventDefault();
-      const factor = e.deltaY < 0 ? 1.12 : 1 / 1.12;
-      const next = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, scale * factor));
-      if (next === scale) return;
-      zoomAt(e.clientX, e.clientY, next);
-    },
-    { passive: false }
-  );
-
-  container.addEventListener("mousedown", (e) => {
-    if (e.button !== 2 || scale <= 1) return;
-    e.preventDefault();
-    panning = true;
-    panStart = { x: e.clientX, y: e.clientY, panX, panY };
-    container.classList.add("is-panning");
-  });
-
-  window.addEventListener("mousemove", (e) => {
-    if (!panning) return;
-    panX = panStart.panX + (e.clientX - panStart.x);
-    panY = panStart.panY + (e.clientY - panStart.y);
-    clampPan();
-    applyTransform();
-  });
-
-  window.addEventListener("mouseup", () => {
-    if (!panning) return;
-    panning = false;
-    container.classList.remove("is-panning");
-  });
-
-  container.addEventListener("contextmenu", (e) => {
-    if (scale > 1) e.preventDefault();
-  });
-
-  container.addEventListener("dblclick", (e) => {
-    e.preventDefault();
-    resetZoom();
-  });
 
   function setPinColors(colors) {
     pinColors = colors;
@@ -131,28 +372,40 @@ export function createMapController(container, overlay, onPlaceGuess) {
     observe = mode;
   }
 
-  function setClickable(v) {
-    clickable = v;
-    container.classList.toggle("map-clickable", v && !observe);
+  function setClickable(value) {
+    clickable = value;
+    container.classList.toggle("map-clickable", value && !observe);
   }
 
-  function normFromEvent(e) {
-    const rect = layer.getBoundingClientRect();
-    const x = (e.clientX - rect.left) / rect.width;
-    const y = (e.clientY - rect.top) / rect.height;
-    return { lat: Math.max(0, Math.min(1, y)), lon: Math.max(0, Math.min(1, x)) };
+  function normFromEvent(event) {
+    const viewportPoint = getViewportPoint(event.clientX, event.clientY);
+    const contentPoint = getContentPointFromViewport(
+      viewportPoint.x,
+      viewportPoint.y
+    );
+    return {
+      lat: clamp(contentPoint.y / viewerState.baseHeight, 0, 1),
+      lon: clamp(contentPoint.x / viewerState.baseWidth, 0, 1),
+    };
   }
 
-  container.addEventListener("click", (e) => {
-    if (!clickable || observe || panning) return;
-    if (e.button !== 0) return;
-    const { lat, lon } = normFromEvent(e);
+  container.addEventListener("click", (event) => {
+    if (
+      !clickable ||
+      observe ||
+      viewerState.gesture ||
+      performance.now() < viewerState.clickUnlockAt
+    ) {
+      return;
+    }
+    if (event.button !== 0) return;
+    const { lat, lon } = normFromEvent(event);
     onPlaceGuess(lat, lon);
   });
 
   function clearPins() {
     Object.values(pins).forEach((el) => el.remove());
-    for (const k of Object.keys(pins)) delete pins[k];
+    for (const key of Object.keys(pins)) delete pins[key];
     clearLines();
   }
 
@@ -165,7 +418,7 @@ export function createMapController(container, overlay, onPlaceGuess) {
     let el = pins[id];
     if (!el) {
       el = document.createElement("div");
-      layer.appendChild(el);
+      mapContent.appendChild(el);
       pins[id] = el;
     }
     if (isAnswer) {
@@ -177,8 +430,7 @@ export function createMapController(container, overlay, onPlaceGuess) {
       el.style.transform = "translate(-50%, -50%) rotate(45deg)";
     } else {
       const isSelf = id === selfId;
-      const centerColor = playerColor(slot);
-      el.className = `pin player-pin ${isSelf ? "pin-self" : "pin-other"}`;
+      el.className = "pin player-pin " + (isSelf ? "pin-self" : "pin-other");
       el.style.background = isSelf ? OUTER_RING_SELF : OUTER_RING_OTHER;
       el.style.border = "none";
       el.style.borderRadius = "50%";
@@ -190,10 +442,10 @@ export function createMapController(container, overlay, onPlaceGuess) {
         inner.className = "pin-inner";
         el.appendChild(inner);
       }
-      inner.style.background = centerColor;
+      inner.style.background = playerColor(slot);
     }
-    el.style.left = `${coord[1] * 100}%`;
-    el.style.top = `${coord[0] * 100}%`;
+    el.style.left = coord[1] * 100 + "%";
+    el.style.top = coord[0] * 100 + "%";
   }
 
   function drawLines(coords, answerCoord, slots) {
@@ -233,19 +485,38 @@ export function createMapController(container, overlay, onPlaceGuess) {
   function render(state) {
     clearPins();
     const slots = {};
-    for (const p of state.players || []) slots[p.player_id] = p.slot;
+    for (const player of state.players || []) {
+      slots[player.player_id] = player.slot;
+    }
 
-    const revealed = state.answer_revealed;
     for (const [pid, coord] of sortedPinEntries(state.coords || {})) {
       upsertPin(pid, coord, slots[pid] || 0);
     }
-    if (revealed && state.answer_coord) {
+    if (state.answer_revealed && state.answer_coord) {
       upsertPin("__answer__", state.answer_coord, 0, true);
       drawLines(state.coords || {}, state.answer_coord, slots);
     }
   }
 
-  applyTransform();
+  mapEl.addEventListener("load", syncViewerBaseSize);
+  if (mapEl.complete) syncViewerBaseSize();
+  window.addEventListener("resize", syncViewerBaseSize);
+  container.addEventListener("mousemove", recordViewerCursor, { passive: true });
+  container.addEventListener("wheel", handleDiagonalPan, { passive: false });
+  window.addEventListener("gesturestart", handleWindowGesture, {
+    passive: false,
+    capture: true,
+  });
+  window.addEventListener("gesturechange", handleWindowGesture, {
+    passive: false,
+    capture: true,
+  });
+  window.addEventListener("gestureend", handleWindowGesture, {
+    passive: false,
+    capture: true,
+  });
+
+  syncViewerBaseSize();
 
   return {
     setPinColors,
@@ -253,6 +524,5 @@ export function createMapController(container, overlay, onPlaceGuess) {
     setObserve,
     setClickable,
     render,
-    resetZoom,
   };
 }
