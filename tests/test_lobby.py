@@ -29,12 +29,26 @@ def test_join_creates_room():
     assert r["is_host"] is True
     room = get_lobby_store().get_room(r["room_id"])
     assert room.status in (LobbyStatus.WAITING, LobbyStatus.COUNTDOWN)
-    assert room.rounds == 6
+    assert room.rounds == 5
     assert room.difficulty == "N"
-    assert room.scoring_strategy == "ranking"
+    assert room.scoring_strategy == "distance"
     assert r["game_settings"]["difficulties"] == ["N", "L"]
-    assert r["game_settings"]["scoring_strategies"] == ["ranking", "distance"]
-    assert r["game_settings"]["default_scoring_strategy"] == "ranking"
+    assert r["game_settings"]["scoring_strategies"] == ["distance", "ranking"]
+    assert r["game_settings"]["default_scoring_strategy"] == "distance"
+
+
+def test_solo_room_waits_for_manual_start():
+    r = lobby_service.join(
+        "solo_wait",
+        "alice",
+        "c1",
+        min_players=1,
+        max_players=1,
+    )
+    assert r["is_host"] is True
+    room = get_lobby_store().get_room("solo_wait")
+    assert room.status == LobbyStatus.WAITING
+    assert room.scoring_strategy == "distance"
 
 
 def test_second_player_joins_same_quick_room():

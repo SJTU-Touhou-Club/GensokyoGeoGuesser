@@ -70,7 +70,7 @@ def round_bounds() -> tuple[int, int]:
 def default_rounds() -> int:
     cfg = get_config().get("rounds", {})
     lo, hi = round_bounds()
-    value = int(cfg.get("default", cfg.get("max_rounds", 6)))
+    value = int(cfg.get("default", cfg.get("max_rounds", 5)))
     return max(lo, min(hi, value))
 
 

@@ -11,7 +11,7 @@ rounds:
   max_hp: 100.0
   min: 1
   max: 20
-  default: 6
+  default: 5
 
 difficulty:
   # Full ordering is E < N < H < L (see neo/defs.py).
@@ -32,19 +32,6 @@ timeouts:
 # The first (uncommented) mode is the default for new rooms.
 # Each mode carries its own settlement function and hyperparameters.
 scoring:
-  ranking:
-    # points = accumulate score; hp = lose health each round
-    mode: points
-    # ranking: place by distance order; ffa: additive distance formula
-    scoring_fn: ranking
-    # Multiplies raw Euclidean distance; also scales ffa score magnitude.
-    # Shape params below stay fixed when this changes (use raw-distance units).
-    distance_scale: 1
-    # Distance epsilon (raw map units) for rank ties / clusters
-    rank_tolerance: 0.02
-    # When cumulative scores (or HP) differ by less than this, share a standings rank
-    tie_threshold: 0.1
-
   distance:
     # points = accumulate score; hp = lose health each round
     mode: points
@@ -55,6 +42,19 @@ scoring:
     # Score drops to 0 when raw_distance >= score_cap_norm (map units, √2 max)
     score_cap_norm: 1.0
     # Distance epsilon (raw map units) for rank ties if ranking helpers are used
+    rank_tolerance: 0.02
+    # When cumulative scores (or HP) differ by less than this, share a standings rank
+    tie_threshold: 0.1
+
+  ranking:
+    # points = accumulate score; hp = lose health each round
+    mode: points
+    # ranking: place by distance order; ffa: additive distance formula
+    scoring_fn: ranking
+    # Multiplies raw Euclidean distance; also scales ffa score magnitude.
+    # Shape params below stay fixed when this changes (use raw-distance units).
+    distance_scale: 1
+    # Distance epsilon (raw map units) for rank ties / clusters
     rank_tolerance: 0.02
     # When cumulative scores (or HP) differ by less than this, share a standings rank
     tie_threshold: 0.1

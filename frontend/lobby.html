@@ -4,7 +4,8 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Gensokyo Geo-Guesser | Lobby</title>
-    <link rel="icon" href="/media/icon.svg" type="image/svg+xml" />
+    <link rel="icon" href="/media/icon.png" type="image/png" />
+    <link rel="apple-touch-icon" href="/media/icon.png" />
     <style>
       body {
         font-family: system-ui, sans-serif;
@@ -29,6 +30,14 @@
       h1 {
         margin: 0 0 18px;
         font-size: 20px;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+      }
+      .lobby-logo {
+        width: 32px;
+        height: 32px;
+        border-radius: 7px;
       }
       .row {
         display: flex;
@@ -55,6 +64,90 @@
         border: 1px solid #ddd;
         border-radius: 8px;
       }
+      #game-settings-row label {
+        min-width: 64px;
+      }
+      #game-settings-row label[for="difficulty"] {
+        margin-left: 12px;
+      }
+      .difficulty-options {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+      }
+      .difficulty-btn {
+        width: 42px;
+        height: 40px;
+        border: 2px solid transparent;
+        border-radius: 8px;
+        font-weight: 700;
+        color: #fff;
+        cursor: pointer;
+      }
+      .difficulty-btn.difficulty-normal {
+        background: #2f6fdb;
+      }
+      .difficulty-btn.difficulty-lunatic {
+        background: #7a4fc8;
+      }
+      .difficulty-btn.active {
+        outline: 2px solid #111;
+        outline-offset: 2px;
+      }
+      .difficulty-info {
+        margin-top: 12px;
+        padding-top: 12px;
+        border-top: 1px solid #e5e7eb;
+        font-size: 13px;
+        color: #444;
+      }
+      .difficulty-info-row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin: 6px 0;
+      }
+      .difficulty-info p {
+        margin: 6px 0 0;
+      }
+      .gameplay-help {
+        margin-top: 14px;
+        padding-top: 12px;
+        border-top: 1px solid #e5e7eb;
+        font-size: 13px;
+        color: #444;
+      }
+      .gameplay-help strong {
+        display: block;
+        margin-bottom: 6px;
+      }
+      .gameplay-help p {
+        margin: 4px 0;
+      }
+      .diff-tag {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 24px;
+        height: 24px;
+        border-radius: 6px;
+        color: #fff;
+        font-weight: 700;
+      }
+      .diff-tag.normal {
+        background: #2f6fdb;
+      }
+      .diff-tag.lunatic {
+        background: #7a4fc8;
+      }
+      #game-settings-row input[type="number"],
+      #game-settings-row select {
+        flex: 0 0 76px;
+        height: 40px;
+        padding: 0 10px;
+        border: 1px solid #ddd;
+        border-radius: 8px;
+      }
       .btn {
         padding: 10px 14px;
         border-radius: 10px;
@@ -67,6 +160,14 @@
         background: #5557ee;
         color: #fff;
         border-color: #5557ee;
+      }
+      .btn.start-normal {
+        background: #2f6fdb;
+        border-color: #2f6fdb;
+      }
+      .btn.start-lunatic {
+        background: #7a4fc8;
+        border-color: #7a4fc8;
       }
       .btn:disabled {
         opacity: 0.5;
@@ -126,18 +227,18 @@
   </head>
   <body>
     <div class="card">
-      <h1>Gensokyo Geo-Guesser | Lobby</h1>
+      <h1><img class="lobby-logo" src="/media/icon.png" alt="" />Gensokyo Geo-Guesser | Lobby</h1>
 
       <div id="form-area">
-        <div class="row">
+        <div class="row" id="player-row" style="display: none">
           <label for="player-id">Player ID</label>
           <input id="player-id" type="text" placeholder="Your name" maxlength="32" />
         </div>
-        <div class="row">
+        <div class="row" id="room-row" style="display: none">
           <label for="room-id">Room ID</label>
           <input id="room-id" type="text" placeholder="Leave blank for quick match" />
         </div>
-        <div class="row host-only" id="minmax-row">
+        <div class="row" id="minmax-row" style="display: none">
           <label>Min / Max</label>
           <input id="min-players" type="number" min="1" max="10" value="2" style="width: 60px" />
           <span>/</span>
@@ -145,36 +246,42 @@
         </div>
         <div class="row host-only" id="game-settings-row">
           <label for="rounds">Rounds</label>
-          <input id="rounds" type="number" min="1" max="20" value="6" style="width: 60px" />
-          <label for="difficulty" style="min-width: auto; margin-left: 8px">Diff</label>
-          <select id="difficulty" style="padding: 8px; border-radius: 8px; border: 1px solid #ddd">
-            <option value="N">N</option>
-            <option value="L">L</option>
-          </select>
-          <label for="scoring-strategy" style="min-width: auto; margin-left: 8px">Score</label>
-          <select id="scoring-strategy" style="padding: 8px; border-radius: 8px; border: 1px solid #ddd; flex: 1">
-            <option value="ranking">Rank</option>
-            <option value="distance">Distance</option>
-          </select>
+          <input id="rounds" type="number" min="1" max="20" value="5" />
+          <label for="difficulty">Diff</label>
+          <div class="difficulty-options">
+            <button type="button" class="difficulty-btn difficulty-normal active" data-value="N">N</button>
+            <button type="button" class="difficulty-btn difficulty-lunatic" data-value="L">L</button>
+            <select id="difficulty" hidden>
+              <option value="N">N</option>
+              <option value="L">L</option>
+            </select>
+          </div>
         </div>
         <div class="row actions">
-          <button id="btn-refmap" class="btn compact" type="button">Ref Map</button>
+          <button id="btn-refmap" class="btn" type="button">Reference Map</button>
           <div class="actions-right">
-            <button id="btn-join" class="btn primary" type="button">Join</button>
-            <button id="btn-observe" class="btn" type="button">Observe</button>
-            <button id="btn-cancel" class="btn" type="button" style="display: none">Cancel</button>
+            <button id="btn-start" class="btn primary host-only start-normal" type="button" style="display: none">Start Game Now</button>
           </div>
+        </div>
+        <div class="difficulty-info">
+          <div class="difficulty-info-row"><span class="diff-tag normal">N</span> 总分 3.0 过关</div>
+          <div class="difficulty-info-row"><span class="diff-tag lunatic">L</span> 总分 3.5 过关</div>
+          <p>L 的题池更难。</p>
+          <p>可以在地图上双指缩放、拖动。</p>
+        </div>
+        <div class="gameplay-help">
+          <strong>玩法</strong>
+          <p>地图（左），题图（右）。</p>
+          <p>先看右侧题图，再到左侧地图双指缩放、拖动并点击对应地点，然后点 Submit。</p>
+          <p>Reference Map 可查看全图。离答案越近，得分越高。</p>
         </div>
       </div>
 
       <div id="waiting-room">
-        <div>Room: <strong id="wr-room"></strong></div>
-        <div>Host: <strong id="wr-host"></strong></div>
-        <div id="wr-players"></div>
+        <div style="display: none">Room: <strong id="wr-room"></strong></div>
+        <div style="display: none">Host: <strong id="wr-host"></strong></div>
+        <div id="wr-players" style="display: none"></div>
         <div id="wr-status" style="margin-top: 8px; color: #555"></div>
-        <button id="btn-start" class="btn primary host-only" type="button" style="margin-top: 12px; display: none">
-          Start Game Now
-        </button>
       </div>
 
       <div id="status-bar">

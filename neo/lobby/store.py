@@ -54,7 +54,7 @@ class LobbyRoom:
     max_players: int = 8
     rounds: int = 6
     difficulty: str = "N"
-    scoring_strategy: str = "ranking"
+    scoring_strategy: str = "distance"
     countdown_deadline: Optional[float] = None
     players: List[LobbyPlayer] = field(default_factory=list)
     spectators: List[LobbySpectator] = field(default_factory=list)

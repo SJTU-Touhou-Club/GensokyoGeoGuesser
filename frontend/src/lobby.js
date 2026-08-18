@@ -28,18 +28,18 @@ let isHost = false;
 let role = "player";
 let playerLimits = { min: 1, max: 10 };
 let gameSettings = {
-  rounds: { min: 1, max: 20, default: 6 },
+  rounds: { min: 1, max: 20, default: 5 },
   difficulties: ["N", "L"],
   default_difficulty: "N",
-  scoring_strategies: ["ranking", "distance"],
-  default_scoring_strategy: "ranking",
+  scoring_strategies: ["distance", "ranking"],
+  default_scoring_strategy: "distance",
 };
 let lastRoomSettings = {
   min: 2,
   max: 8,
-  rounds: 6,
+  rounds: 5,
   difficulty: "N",
-  scoring_strategy: "ranking",
+  scoring_strategy: "distance",
 };
 let syncingSettings = false;
 
@@ -50,7 +50,6 @@ const els = {
   maxPlayers: document.getElementById("max-players"),
   rounds: document.getElementById("rounds"),
   difficulty: document.getElementById("difficulty"),
-  scoringStrategy: document.getElementById("scoring-strategy"),
   join: document.getElementById("btn-join"),
   observe: document.getElementById("btn-observe"),
   refMap: document.getElementById("btn-refmap"),
@@ -67,6 +66,17 @@ const els = {
 };
 
 els.playerId.value = getStoredPlayerId();
+
+function syncDifficultyButtons() {
+  document.querySelectorAll(".difficulty-btn").forEach((btn) => {
+    btn.classList.toggle("active", btn.dataset.value === els.difficulty.value);
+  });
+  if (els.start) {
+    const value = els.difficulty.value;
+    els.start.classList.toggle("start-normal", value === "N");
+    els.start.classList.toggle("start-lunatic", value === "L");
+  }
+}
 
 function applyPlayerLimitBounds(limits) {
   if (!limits) return;
@@ -98,22 +108,10 @@ function applyGameSettings(settings) {
       settings.difficulties.includes(current)
         ? current
         : settings.default_difficulty || settings.difficulties[0];
-    if (preferred) els.difficulty.value = preferred;
-  }
-  if (settings.scoring_strategies) {
-    const current = els.scoringStrategy.value;
-    els.scoringStrategy.innerHTML = "";
-    for (const s of settings.scoring_strategies) {
-      const opt = document.createElement("option");
-      opt.value = s;
-      opt.textContent = s;
-      els.scoringStrategy.appendChild(opt);
+    if (preferred) {
+      els.difficulty.value = preferred;
+      syncDifficultyButtons();
     }
-    const preferred =
-      settings.scoring_strategies.includes(current)
-        ? current
-        : settings.default_scoring_strategy || settings.scoring_strategies[0];
-    if (preferred) els.scoringStrategy.value = preferred;
   }
 }
 
@@ -123,16 +121,16 @@ function syncSettingsInputs(room) {
   if (room.min_players != null) els.minPlayers.value = room.min_players;
   if (room.max_players != null) els.maxPlayers.value = room.max_players;
   if (room.rounds != null) els.rounds.value = room.rounds;
-  if (room.difficulty != null) els.difficulty.value = room.difficulty;
-  if (room.scoring_strategy != null) {
-    els.scoringStrategy.value = room.scoring_strategy;
+  if (room.difficulty != null) {
+    els.difficulty.value = room.difficulty;
+    syncDifficultyButtons();
   }
   lastRoomSettings = {
     min: Number(els.minPlayers.value),
     max: Number(els.maxPlayers.value),
     rounds: Number(els.rounds.value),
     difficulty: els.difficulty.value,
-    scoring_strategy: els.scoringStrategy.value,
+    scoring_strategy: "distance",
   };
   syncingSettings = false;
 }
@@ -238,10 +236,8 @@ function enterWaiting(data) {
   role = data.role;
   applyPlayerLimitBounds(data.player_limits);
   applyGameSettings(data.game_settings);
-  els.waiting.style.display = "block";
-  els.cancel.style.display = "";
-  els.join.disabled = true;
-  els.observe.disabled = true;
+  if (els.join) els.join.disabled = true;
+  if (els.observe) els.observe.disabled = true;
   updateRoomUI(data.room);
   connectLobbySSE(data.sse_url);
   startHeartbeat();
@@ -269,6 +265,11 @@ function updateRoomUI(room) {
   const n = (room.players || []).length;
   const min = room.min_players;
   let text = "";
+  if (room.min_players === 1 && room.max_players === 1 && status === "WAITING") {
+    text = "Solo ready. Press Start.";
+    setHostOnlyVisible();
+    return;
+  }
   if (status === "WAITING" && n < min) {
     text = `Waiting for players… (need at least ${min})`;
   } else if (status === "WAITING") {
@@ -371,7 +372,7 @@ async function pushRoomSettings() {
   const max_players = Number(els.maxPlayers.value);
   const rounds = Number(els.rounds.value);
   const difficulty = els.difficulty.value;
-  const scoring_strategy = els.scoringStrategy.value;
+  const scoring_strategy = "distance";
   if (max_players < min_players) {
     showError("INVALID_PLAYER_LIMITS");
     syncSettingsInputs(lastRoomSettings);
@@ -406,75 +407,16 @@ els.rounds.addEventListener("change", () => {
   pushRoomSettings();
 });
 els.difficulty.addEventListener("change", () => {
+  syncDifficultyButtons();
   pushRoomSettings();
 });
-els.scoringStrategy.addEventListener("change", () => {
-  pushRoomSettings();
+document.querySelectorAll(".difficulty-btn").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    els.difficulty.value = btn.dataset.value;
+    syncDifficultyButtons();
+    pushRoomSettings();
+  });
 });
-
-els.join.addEventListener("click", async () => {
-  const player_id = els.playerId.value.trim();
-  setStoredPlayerId(player_id);
-  els.join.disabled = true;
-  try {
-    const room_id = els.roomId.value.trim() || null;
-    const data = await post("/api/lobby/join", {
-      room_id,
-      player_id,
-      connection_id: getConnectionId(),
-      min_players: Number(els.minPlayers.value),
-      max_players: Number(els.maxPlayers.value),
-      rounds: Number(els.rounds.value),
-      difficulty: els.difficulty.value,
-      scoring_strategy: els.scoringStrategy.value,
-    });
-    enterWaiting(data);
-  } catch (e) {
-    showError(e.code || e.error);
-    els.join.disabled = false;
-  }
-});
-
-els.observe.addEventListener("click", async () => {
-  const player_id = els.playerId.value.trim();
-  const room_id = els.roomId.value.trim();
-  if (!room_id) {
-    showError("Room ID required for Observe");
-    return;
-  }
-  setStoredPlayerId(player_id);
-  els.observe.disabled = true;
-  try {
-    const data = await post("/api/lobby/observe", {
-      room_id,
-      player_id,
-      connection_id: getConnectionId(),
-    });
-    enterWaiting(data);
-  } catch (e) {
-    showError(e.code || e.error);
-    els.observe.disabled = false;
-  }
-});
-
-els.cancel.addEventListener("click", async () => {
-  if (currentRoom) {
-    await post("/api/lobby/leave", {
-      room_id: currentRoom,
-      player_id: selfPlayerId,
-      connection_id: getConnectionId(),
-    }).catch(() => {});
-  }
-  if (evtSource) evtSource.close();
-  if (heartbeatTimer) clearInterval(heartbeatTimer);
-  lobbyCountdown.stop();
-  currentRoom = null;
-  els.waiting.style.display = "none";
-  els.cancel.style.display = "none";
-  els.join.disabled = false;
-  els.observe.disabled = false;
-});
-
 function redirectToGame(roomId) {
   const observeParam = role === "spectator" ? "&observe=1" : "";
   window.location.href = `/index.html?room=${encodeURIComponent(roomId)}&player_id=${encodeURIComponent(selfPlayerId)}${observeParam}`;
@@ -494,6 +436,29 @@ els.start?.addEventListener("click", async () => {
     showError(e.code || e.error);
   }
 });
+
+async function startSoloSession() {
+  const playerId = els.playerId.value.trim() || "solo";
+  els.playerId.value = playerId;
+  setStoredPlayerId(playerId);
+  try {
+    const data = await post("/api/lobby/join", {
+      room_id: null,
+      player_id: playerId,
+      connection_id: getConnectionId(),
+      min_players: 1,
+      max_players: 1,
+      rounds: Number(els.rounds.value),
+      difficulty: els.difficulty.value,
+      scoring_strategy: "distance",
+    });
+    enterWaiting(data);
+  } catch (e) {
+    showError(e.code || e.error);
+  }
+}
+
+startSoloSession();
 
 window.addEventListener("pagehide", () => {
   if (!currentRoom) return;
