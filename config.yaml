@@ -1,0 +1,122 @@
+players:
+  min: 2
+  max: 10
+
+lobby:
+  countdown_seconds: 30
+  heartbeat_seconds: 5
+
+rounds:
+  max_rounds: 8
+  max_hp: 100.0
+  min: 1
+  max: 20
+  default: 6
+
+difficulty:
+  # Full ordering is E < N < H < L (see neo/defs.py).
+  # Only N and L are exposed while the dataset has those tiers.
+  choices: [N, L]
+  default: N
+
+data_files:
+  locations: locations_v2.csv
+  questions: questions_v3.csv
+
+timeouts:
+  place_guess: 30
+  agree_next: 5
+
+# Host-selectable scoring modes.
+# Each top-level key under scoring is a mode name shown in the lobby Score dropdown.
+# The first (uncommented) mode is the default for new rooms.
+# Each mode carries its own settlement function and hyperparameters.
+scoring:
+  ranking:
+    # points = accumulate score; hp = lose health each round
+    mode: points
+    # ranking: place by distance order; ffa: additive distance formula
+    scoring_fn: ranking
+    # Multiplies raw Euclidean distance; also scales ffa score magnitude.
+    # Shape params below stay fixed when this changes (use raw-distance units).
+    distance_scale: 1
+    # Distance epsilon (raw map units) for rank ties / clusters
+    rank_tolerance: 0.02
+    # When cumulative scores (or HP) differ by less than this, share a standings rank
+    tie_threshold: 0.1
+
+  distance:
+    # points = accumulate score; hp = lose health each round
+    mode: points
+    # ffa score = distance_scale * max(score_cap_norm - raw_distance, 0) * round_mult
+    scoring_fn: ffa
+    # Multiplies raw Euclidean distance; also scales ffa score magnitude
+    distance_scale: 1
+    # Score drops to 0 when raw_distance >= score_cap_norm (map units, √2 max)
+    score_cap_norm: 1.0
+    # Distance epsilon (raw map units) for rank ties if ranking helpers are used
+    rank_tolerance: 0.02
+    # When cumulative scores (or HP) differ by less than this, share a standings rank
+    tie_threshold: 0.1
+
+  # --- Optional / disabled modes (uncomment a block to expose it in the lobby) ---
+
+  # ffa_hp:
+  #   # points = accumulate score; hp = lose health each round
+  #   mode: hp
+  #   # damage_i = scaled_distance * round_mult
+  #   damage_fn: ffa
+  #   # Multiplies raw Euclidean distance into damage units
+  #   distance_scale: 50
+  #   # When cumulative HP differ by less than this, share a standings rank
+  #   tie_threshold: 0.1
+  #   # End game as soon as any player reaches 0 HP
+  #   end_on_hp_zero: true
+
+  # ranking_hp:
+  #   # points = accumulate score; hp = lose health each round
+  #   mode: hp
+  #   # damage_i = hp_budget * rank_weight * round_mult (best rank takes 0 damage)
+  #   damage_fn: ranking
+  #   # Multiplies raw Euclidean distance (magnitude knob for non-rank consumers)
+  #   distance_scale: 50
+  #   # Distance epsilon (raw map units) for rank ties / clusters
+  #   rank_tolerance: 0.02
+  #   # When cumulative HP differ by less than this, share a standings rank
+  #   tie_threshold: 0.1
+  #   # End game as soon as any player reaches 0 HP
+  #   end_on_hp_zero: true
+  #   ranking:
+  #     # Spreads total budget across the match; lower => more damage per round
+  #     hp_budget_factor: 0.22
+  #     # When true, budget scales with 2/N so larger lobbies deal less per miss
+  #     player_scale: true
+
+  # distance_points_scaled:
+  #   # Same as distance, with larger absolute score magnitude via distance_scale
+  #   mode: points
+  #   scoring_fn: ffa
+  #   distance_scale: 50
+  #   score_cap_norm: 1.0
+  #   rank_tolerance: 0.02
+  #   tie_threshold: 0.1
+
+dmg_mult_schedule:
+  - { rounds: 10, mult: 1.0 }
+  - { rounds: 4, mult: 1.5 }
+  - { rounds: 999, mult: 2.0 }
+
+pin_colors:
+  - "#5557EE"
+  - "#EE5755"
+  - "#57EE55"
+  - "#EEAA55"
+  - "#AA55EE"
+  - "#55EEAA"
+  - "#EE55AA"
+  - "#55AAEE"
+  - "#EEEE55"
+  - "#EE5555"
+
+debug:
+  enabled: false
