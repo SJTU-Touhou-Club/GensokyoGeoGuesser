@@ -258,3 +258,48 @@ def test_solo_rooms_are_separate_from_each_other_and_multiplayer():
         with pytest.raises(LobbyError) as exc:
             lobby_service.join(room.room_id, "intruder", "c4")
         assert exc.value.code == "ROOM_FULL"
+
+
+def test_expired_lobby_membership_clears_index_and_allows_rejoin(monkeypatch):
+    result = lobby_service.join(None, "alice", "c1")
+    room = get_lobby_store().get_room(result["room_id"])
+    now = room.players[0].last_heartbeat
+    monkeypatch.setattr(lobby_service.time, "time", lambda: now + 61)
+    lobby_service._prune_stale_connections(room, 60)
+    assert get_lobby_store().get_player_room("alice") is None
+    assert lobby_service.join(None, "alice", "c2")["is_host"] is True
+
+
+def test_lobby_lease_tracks_each_connection(monkeypatch):
+    result = lobby_service.join("lease", "alice", "old")
+    room = get_lobby_store().get_room(result["room_id"])
+    now = room.players[0].last_heartbeat
+    monkeypatch.setattr(lobby_service.time, "time", lambda: now + 30)
+    lobby_service.join("lease", "alice", "new")
+    monkeypatch.setattr(lobby_service.time, "time", lambda: now + 61)
+    heartbeat = lobby_service.heartbeat("lease", "alice", "new")
+    assert heartbeat["present"] is True
+    assert room.players[0].connection_ids == {"new"}
+
+
+def test_lost_quick_join_response_can_be_retried():
+    first = lobby_service.join(None, "alice", "same-tab")
+    second = lobby_service.join(None, "alice", "same-tab")
+    assert first["room_id"] == second["room_id"]
+    assert len(get_lobby_store().get_room(first["room_id"]).players) == 1
+
+
+def test_lobby_heartbeat_recovers_missed_game_start():
+    lobby_service.join("recover", "alice", "c1")
+    lobby_service.start("recover", "alice")
+    result = lobby_service.heartbeat("recover", "alice", "c1")
+    assert result["room"]["status"] == "IN_GAME"
+    assert result["present"] is True
+    assert lobby_service.start("recover", "alice")["status"] == "IN_GAME"
+
+
+def test_lobby_snapshots_have_monotonic_revisions():
+    first = lobby_service.join("revision", "alice", "c1")
+    second = lobby_service.update_room_settings("revision", "alice", 2, 4, rounds=3)
+    heartbeat = lobby_service.heartbeat("revision", "alice", "c1")
+    assert first["room"]["revision"] < second["room"]["revision"] < heartbeat["room"]["revision"]

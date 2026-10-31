@@ -118,5 +118,7 @@ def events(room_id: str):
         lobby_sse.event_stream(room_id, q),
         mimetype="text/event-stream",
     )
+    response.headers["Cache-Control"] = "no-cache, no-store"
+    response.headers["X-Accel-Buffering"] = "no"
     response.call_on_close(lambda: lobby_sse.unsubscribe(room_id, q))
     return response

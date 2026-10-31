@@ -162,6 +162,7 @@ def _ensure_living_host(room: LobbyRoom) -> bool:
 
 def _room_update_payload(room: LobbyRoom) -> dict:
     return {
+        "revision": room.revision,
         "host_id": room.host_id,
         "players": room.to_dict()["players"],
         "spectators": room.to_dict()["spectators"],
@@ -204,6 +205,17 @@ def join(
     )
 
     existing = store.get_player_room(player_id)
+    if existing:
+        previous = store.get_room(existing)
+        if previous:
+            with store.acquire_lock(existing):
+                _prune_stale_connections(previous, _lobby_cfg().get("reconnect_grace_seconds", 60))
+        existing = store.get_player_room(player_id)
+    if existing and not room_id:
+        previous = store.get_room(existing)
+        member = _find_player(previous, player_id) if previous else None
+        if member and connection_id in member.connection_ids:
+            room_id = existing
     if existing and existing != room_id:
         raise LobbyError("ALREADY_IN_ROOM", 409)
 
@@ -237,8 +249,8 @@ def join(
 
         if len(room.players) >= room.max_players:
             existing_p = _find_player(room, player_id)
-            if existing_p and connection_id in existing_p.connection_ids:
-                return _build_join_response(room, player_id, True)
+            if existing_p:
+                return _reconnect_player(store, room, existing_p, connection_id, player_id)
             raise LobbyError("ROOM_FULL", 409)
 
         player = _find_player(room, player_id)
@@ -249,6 +261,7 @@ def join(
         player.connection_ids.add(connection_id)
         player.connected = True
         player.last_heartbeat = time.time()
+        player.connection_seen[connection_id] = player.last_heartbeat
         store.set_player_room(player_id, room_id, "player")
         _ensure_living_host(room)
         store.save_room(room)
@@ -288,6 +301,7 @@ def _reconnect_player(store, room: LobbyRoom, player: LobbyPlayer, connection_id
     player.connection_ids.add(connection_id)
     player.connected = True
     player.last_heartbeat = time.time()
+    player.connection_seen[connection_id] = player.last_heartbeat
     store.set_player_room(player_id, room.room_id, "player")
     store.save_room(room)
     return _build_join_response(room, player_id, player_id == room.host_id)
@@ -319,6 +333,7 @@ def observe(room_id: str, player_id: str, connection_id: str) -> dict:
             room.spectators.append(spec)
         spec.connection_ids.add(connection_id)
         spec.last_heartbeat = time.time()
+        spec.connection_seen[connection_id] = spec.last_heartbeat
         store.set_player_room(player_id, room_id, "spectator")
         store.save_room(room)
         _emit(room_id, "lobby_update", _room_update_payload(room))
@@ -335,6 +350,7 @@ def leave(room_id: str, player_id: str, connection_id: str) -> dict:
         for p in list(room.players):
             if p.player_id == player_id:
                 p.connection_ids.discard(connection_id)
+                p.connection_seen.pop(connection_id, None)
                 if not p.connection_ids:
                     room.players.remove(p)
                     store.set_player_room(player_id, None, "player")
@@ -343,6 +359,7 @@ def leave(room_id: str, player_id: str, connection_id: str) -> dict:
         for s in list(room.spectators):
             if s.player_id == player_id:
                 s.connection_ids.discard(connection_id)
+                s.connection_seen.pop(connection_id, None)
                 if not s.connection_ids:
                     room.spectators.remove(s)
                     store.set_player_room(player_id, None, "spectator")
@@ -367,7 +384,8 @@ def start(room_id: str, player_id: str) -> dict:
         if room.host_id != player_id:
             raise LobbyError("NOT_HOST", 403)
         if room.status == LobbyStatus.IN_GAME:
-            raise LobbyError("ROOM_IN_GAME", 409)
+            return {"ok": True, "status": "IN_GAME", "room_id": room.room_id,
+                    "game_url": f"/index.html?room={room.room_id}&player_id={player_id}"}
         if not room.players:
             raise LobbyError("ROOM_EMPTY", 400)
         _begin_starting(room)
@@ -428,24 +446,30 @@ def update_room_settings(
 
 def heartbeat(room_id: str, player_id: str, connection_id: str) -> dict:
     store = get_lobby_store()
-    timeout = 3 * _lobby_cfg()["heartbeat_seconds"]
+    timeout = _lobby_cfg().get("reconnect_grace_seconds", 60)
     with store.acquire_lock(room_id):
         room = store.get_room(room_id)
         if room is None:
-            return {"ok": True}
+            return {"ok": True, "present": False}
         now = time.time()
         for p in room.players:
-            if p.player_id == player_id and connection_id in p.connection_ids:
+            if p.player_id == player_id:
+                p.connection_ids.add(connection_id)
                 p.last_heartbeat = now
+                p.connection_seen[connection_id] = now
         for s in room.spectators:
-            if s.player_id == player_id and connection_id in s.connection_ids:
+            if s.player_id == player_id:
+                s.connection_ids.add(connection_id)
                 s.last_heartbeat = now
+                s.connection_seen[connection_id] = now
         _prune_stale_connections(room, timeout)
         _evaluate_countdown(room)
         store.save_room(room)
         return {
             "ok": True,
             "status": room.status.value,
+            "room": room.to_dict(),
+            "present": any(m.player_id == player_id for m in room.players + room.spectators),
             "countdown_deadline": room.countdown_deadline,
             "countdown_remaining_seconds": room.countdown_remaining_seconds(),
         }
@@ -466,16 +490,18 @@ def room_status(room_id: str) -> dict:
 def _prune_stale_connections(room: LobbyRoom, timeout: float) -> None:
     now = time.time()
     removed = False
-    for p in list(room.players):
-        stale = [c for c in p.connection_ids if now - p.last_heartbeat > timeout]
-        for c in stale:
-            p.connection_ids.discard(c)
-        if not p.connection_ids:
-            room.players.remove(p)
-            removed = True
-            _emit(room.room_id, "player_left", {"player_id": p.player_id})
-        else:
-            p.connected = True
+    for members in (room.players, room.spectators):
+        for member in list(members):
+            for cid in list(member.connection_ids):
+                if now - member.connection_seen.get(cid, member.last_heartbeat) > timeout:
+                    member.connection_ids.discard(cid)
+                    member.connection_seen.pop(cid, None)
+            if not member.connection_ids:
+                members.remove(member)
+                if get_lobby_store().get_player_room(member.player_id) == room.room_id:
+                    get_lobby_store().set_player_room(member.player_id, None, "player")
+                removed = True
+                _emit(room.room_id, "player_left", {"player_id": member.player_id})
     host_changed = _ensure_living_host(room) if removed else False
     if room.status == LobbyStatus.COUNTDOWN and len(room.players) < room.min_players:
         room.status = LobbyStatus.WAITING
@@ -563,6 +589,8 @@ def tick_all_rooms() -> None:
         try:
             with store.acquire_lock(room_id):
                 room = store.get_room(room_id)
+                if room and room.status in (LobbyStatus.WAITING, LobbyStatus.COUNTDOWN):
+                    _prune_stale_connections(room, _lobby_cfg().get("reconnect_grace_seconds", 60))
                 if room and room.status == LobbyStatus.COUNTDOWN:
                     before = room.status
                     _evaluate_countdown(room)

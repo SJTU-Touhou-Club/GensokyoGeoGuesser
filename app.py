@@ -3,8 +3,9 @@ from __future__ import annotations
 import argparse
 import threading
 import time
+import uuid
 
-from flask import Flask, redirect, send_from_directory
+from flask import Flask, g, jsonify, redirect, request, send_from_directory
 
 from neo.config import load_config, project_root, set_debug_mode, static_dir
 from neo.game import database as game_db
@@ -19,13 +20,54 @@ load_config()
 game_db.init_database()
 
 app = Flask(__name__, static_folder=str(static_dir()), static_url_path="")
+# Leave API capacity free in the 32-thread, single-worker deployment.
+_stream_slots = threading.BoundedSemaphore(24)
+
+
+@app.before_request
+def request_context():
+    g.request_id = uuid.uuid4().hex[:12]
+    g.request_started = time.monotonic()
+    if request.path.startswith("/events/"):
+        if not _stream_slots.acquire(blocking=False):
+            return jsonify({"error": "Stream capacity reached; polling remains available"}), 503
+        g.stream_slot = True
+
+
+@app.after_request
+def response_context(response):
+    response.headers["X-Request-ID"] = g.request_id
+    response.headers["Server-Timing"] = f"app;dur={(time.monotonic() - g.request_started) * 1000:.1f}"
+    if getattr(g, "stream_slot", False):
+        response.call_on_close(_stream_slots.release)
+    return response
 
 
 def _lobby_tick():
     while True:
         time.sleep(1)
-        lobby_service.tick_all_rooms()
-        game_engine.tick_all_rooms()
+        try:
+            lobby_service.tick_all_rooms()
+            game_engine.tick_all_rooms()
+        except Exception:
+            app.logger.exception("Room tick failed")
+
+
+_tick_lock = threading.Lock()
+_tick_started = False
+
+
+def start_background_tasks():
+    global _tick_started
+    with _tick_lock:
+        if not _tick_started:
+            threading.Thread(target=_lobby_tick, daemon=True).start()
+            _tick_started = True
+
+
+def create_app():
+    start_background_tasks()
+    return app
 
 
 game_engine.set_broadcast(game_sse.broadcast)
@@ -67,7 +109,6 @@ if __name__ == "__main__":
     args = parse_args()
     if args.debug:
         set_debug_mode(True)
-    tick_thread = threading.Thread(target=_lobby_tick, daemon=True)
-    tick_thread.start()
+    start_background_tasks()
     print(f"Starting Neo server on port {args.host}:{args.port} (debug={args.debug})")
     app.run(debug=args.debug, port=args.port, threaded=True, host=args.host)

@@ -58,12 +58,16 @@ def test_state_version_increments():
     assert db.get_room("test_room").state_version > v0
 
 
-def test_afk_auto_submit_on_disconnect():
+def test_disconnect_grace_then_expiry(monkeypatch):
     _init_two_player_room()
     room = db.get_room("test_room")
     engine.exit_connection("test_room", "bob", "conn1")
     engine.place_guess("test_room", "alice", 0.3, 0.3)
     engine.submit("test_room", "alice")
+    assert room.player_connected["bob"] is True
+    disconnected_at = room.disconnect_since["bob"]
+    monkeypatch.setattr(engine.time, "time", lambda: disconnected_at + 61)
+    engine.prune_connections("test_room")
     assert room.player_connected["bob"] is False
 
 
@@ -202,3 +206,19 @@ def test_distance_scoring_scales_with_distance_scale():
         engine.submit("scale", "alice")
         room = db.get_room("scale")
         assert room.player_round_score["alice"] == pytest.approx(scale * 1.0)
+
+
+def test_connection_return_during_grace_restores_lease(monkeypatch):
+    _init_two_player_room()
+    room = db.get_room("test_room")
+    engine.register_connection("test_room", "alice", "c1")
+    now = engine.time.time()
+    engine.exit_connection("test_room", "alice", "c1")
+    monkeypatch.setattr(engine.time, "time", lambda: now + 30)
+    engine.register_connection("test_room", "alice", "c1")
+    monkeypatch.setattr(engine.time, "time", lambda: now + 61)
+    engine.prune_connections("test_room")
+    assert room.player_connected["alice"] is True
+    monkeypatch.setattr(engine.time, "time", lambda: now + 91)
+    engine.prune_connections("test_room")
+    assert room.player_connected["alice"] is False

@@ -7,9 +7,13 @@ Type=simple
 User=priv
 Group=priv
 WorkingDirectory=/home/priv/apps/GensokyoGeoGuesser
-ExecStart=/home/priv/apps/GensokyoGeoGuesser/.venv/bin/python app.py --port 20811
+ExecStart=/home/priv/apps/GensokyoGeoGuesser/.venv/bin/gunicorn --workers 1 --worker-class gthread --threads 32 --bind 127.0.0.1:20811 --timeout 0 --access-logfile - --error-logfile - app:create_app()
 Restart=on-failure
 RestartSec=5
+MemoryHigh=320M
+MemoryMax=448M
+MemorySwapMax=128M
+TasksMax=128
 
 # Keep stdout/stderr in journald for `journalctl -u ggg-neo`.
 StandardOutput=journal

@@ -62,6 +62,7 @@ def check_timeouts(room_id: str) -> None:
 def tick_all_rooms() -> None:
     for room_id in list(db.rooms.keys()):
         try:
+            prune_connections(room_id)
             check_timeouts(room_id)
         except Exception:
             pass
@@ -130,6 +131,8 @@ def register_connection(room_id: str, player_id: str, connection_id: str) -> Non
     if player_id not in room.player_ids:
         return
     room.player_connections.setdefault(player_id, set()).add(connection_id)
+    room.connection_seen.setdefault(player_id, {})[connection_id] = time.time()
+    room.disconnect_since.pop(player_id, None)
     if not room.player_connected.get(player_id):
         room.player_connected[player_id] = True
         room.bump_version()
@@ -144,10 +147,33 @@ def exit_connection(room_id: str, player_id: str, connection_id: str) -> None:
     conns = room.player_connections.get(player_id, set())
     conns.discard(connection_id)
     room.player_connections[player_id] = conns
-    if len(conns) == 0 and room.player_connected.get(player_id):
-        room.player_connected[player_id] = False
-        room.bump_version()
-        _emit(room_id, "player_status")
+    room.connection_seen.setdefault(player_id, {}).pop(connection_id, None)
+    if not conns:
+        room.disconnect_since.setdefault(player_id, time.time())
+
+
+@room_lock_guard
+def prune_connections(room_id: str) -> None:
+    room = db.get_room(room_id)
+    now = time.time()
+    grace = get_config().get("connection", {}).get("reconnect_grace_seconds", 60)
+    for player_id in room.player_ids:
+        seen = room.connection_seen.setdefault(player_id, {})
+        last_activity = max(seen.values(), default=now)
+        for cid, timestamp in list(seen.items()):
+            if now - timestamp > grace:
+                seen.pop(cid, None)
+                room.player_connections.setdefault(player_id, set()).discard(cid)
+        conns = room.player_connections.get(player_id, set())
+        if conns:
+            continue
+        since = room.disconnect_since.setdefault(player_id, last_activity)
+        # A lease that expired already includes the full grace period.
+        expired = room.player_connected.get(player_id) and now - since >= grace
+        if expired:
+            room.player_connected[player_id] = False
+            room.bump_version()
+            _emit(room_id, "player_status")
 
 
 def _apply_guess_timeout(room_id: str) -> None:
@@ -259,7 +285,7 @@ def _advance_round(room_id: str) -> None:
     room.phase = Phase.GUESS
     room.last_timeout_applied = None
     try:
-        db.sample_question(room_id)
+        db.get_current_question(room_id)
     except StopIteration:
         _enter_game_over(room_id)
         return
@@ -353,7 +379,7 @@ def debug_next_round(room_id: str) -> None:
         room.round_index += 1
         room.reset_round_fields()
         room.phase = Phase.GUESS
-        db.sample_question(room_id)
+        db.get_current_question(room_id)
         _afk_auto_guess(room)
         room.bump_version()
         _emit(room_id, "next_round")

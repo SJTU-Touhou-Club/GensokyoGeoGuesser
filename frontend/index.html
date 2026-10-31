@@ -8,6 +8,7 @@
     <link rel="stylesheet" href="/src/styles.css" />
   </head>
   <body>
+    <div id="connection-status" role="status" aria-live="polite" hidden></div>
     <div id="observe-banner">Spectating — read only</div>
 
     <div id="game-area">
@@ -15,7 +16,7 @@
         <div id="map-container">
           <div id="map-sizer" aria-hidden="true"></div>
           <div id="map-content">
-            <img id="map" src="/media/map_v2.jpg" alt="Gensokyo Map" draggable="false" />
+            <img id="map" src="/media/map_v2.jpg" alt="Gensokyo Map" draggable="false" decoding="async" fetchpriority="high" />
             <svg id="map-overlay" viewBox="0 0 100 100" preserveAspectRatio="none"></svg>
           </div>
         </div>
@@ -43,7 +44,7 @@
           <button id="submit-btn" type="button" disabled>Submit</button>
         </div>
         <div id="question-container">
-          <img id="question-img" src="" alt="Question" />
+          <img id="question-img" decoding="async" fetchpriority="high" src="" alt="Question" />
           <div id="question-comment" style="display: none"></div>
           <div id="answer-info" style="display: none">
             Answer: <span id="answer-name">--</span>
@@ -53,7 +54,7 @@
     </div>
 
     <div id="ref-overlay">
-      <img src="/media/ref_map_v2.jpg" alt="Reference map" />
+      <img data-src="/media/ref_map_v2.jpg" alt="Reference map" decoding="async" />
     </div>
 
     <div id="game-over-overlay">

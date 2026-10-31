@@ -4,7 +4,8 @@ players:
 
 lobby:
   countdown_seconds: 30
-  heartbeat_seconds: 5
+  heartbeat_seconds: 2
+  reconnect_grace_seconds: 60
 
 rounds:
   max_rounds: 8
@@ -22,6 +23,10 @@ difficulty:
 data_files:
   locations: locations_v2.csv
   questions: questions_v3.csv
+
+connection:
+  heartbeat_seconds: 1
+  reconnect_grace_seconds: 60
 
 timeouts:
   place_guess: 30

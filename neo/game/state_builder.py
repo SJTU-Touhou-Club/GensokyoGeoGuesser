@@ -10,6 +10,7 @@ from neo.scoring.rank import assign_score_ranks, assign_standings_ranks
 from neo.settlement.mode import get_game_mode, get_scoring_fn_name
 
 
+@db.room_lock_guard
 def build_state(
     room_id: str,
     player_id: str,
@@ -82,6 +83,7 @@ def build_state(
         "answer_coord": list(answer_coord) if show_answer else None,
         "answer_loc": answer_loc if show_answer else None,
         "question_img": question.image_path,
+        "prefetch_question_img": db.next_question_image(room_id),
         "question_comment": question.comment,
         "rankings": room.rankings,
         "has_next": db.has_next_round(room_id),

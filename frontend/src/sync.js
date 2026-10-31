@@ -1,147 +1,204 @@
-import { getConnectionId } from "./connection.js";
+import { getConnectionId, requestJson } from "./connection.js";
 
 export function createSyncScheduler() {
-  let roomId = null;
-  let playerId = null;
-  let localVersion = 0;
+  let roomId, playerId;
+  let localVersion = -1;
+  let latestState = null;
   let evtSource = null;
-  let fetchTimer = null;
   let pollTimer = null;
-  let pollAttempt = 0;
-  let onStateCb = null;
-  let onLogCb = null;
-  let destroyed = false;
+  let reconnectTimer = null;
+  let fetchTimer = null;
+  let inFlight = null;
+  let fetchAgain = false;
+  let actionQueue = Promise.resolve();
+  let latestGuess = null;
+  let onStateCb, onLogCb, onStatusCb;
+  let destroyed = true;
+  let suspended = false;
+  let generation = 0;
+  let lastStream = 0;
+  let retryDelay = 250;
 
-  function log(msg) {
-    if (onLogCb) onLogCb(msg);
-  }
+  const log = message => onLogCb?.(message);
+  const status = message => onStatusCb?.(message);
+  const qs = () => new URLSearchParams({ room: roomId, player_id: playerId });
 
-  function qs(extra = {}) {
-    const p = new URLSearchParams({
-      room: roomId,
-      player_id: playerId,
-      ...extra,
-    });
-    return p.toString();
-  }
-
-  function applyStateIfNewer(data) {
-    if (!data || typeof data.state_version !== "number") return;
-    if (data.state_version < localVersion) {
-      log(`discard stale v${data.state_version} < ${localVersion}`);
-      return;
-    }
+  function applyState(data) {
+    if (destroyed || data?.state_version == null || data.state_version < localVersion) return;
+    latestState = data;
     localVersion = data.state_version;
-    try {
-      if (onStateCb) onStateCb(data);
-    } catch (e) {
-      console.error("UI update failed:", e);
-      log(`UI error: ${e.message}`);
-    }
+    status("");
+    try { onStateCb?.(data); } catch (error) { log(`UI error: ${error.message}`); }
   }
 
-  function scheduleFetch(delay = 100) {
-    if (fetchTimer) clearTimeout(fetchTimer);
-    fetchTimer = setTimeout(() => fetchState(), delay);
-  }
-
-  async function fetchState() {
-    if (destroyed) return null;
-    try {
-      const url = `/api/state?${qs({ connection_id: getConnectionId() })}`;
-      const r = await fetch(url);
-      if (r.status === 404) {
-        log("room not found");
-        return null;
-      }
-      const data = await r.json();
-      if (data.error) {
-        log(`state error: ${data.code}`);
-        return null;
-      }
-      applyStateIfNewer(data);
-      return data;
-    } catch (e) {
-      log(`fetch failed: ${e.message}`);
-      return null;
+  function fetchState() {
+    if (destroyed || suspended) return Promise.resolve(null);
+    if (inFlight) {
+      fetchAgain = true;
+      return inFlight;
     }
-  }
-
-  function startPollingFallback() {
-    if (pollTimer) return;
-    log("SSE error, polling fallback");
-    if (evtSource) {
-      evtSource.close();
-      evtSource = null;
-    }
-    const attempt = () => {
-      if (destroyed) return;
-      const delay = Math.min(16000, 1000 * 2 ** pollAttempt);
-      pollTimer = setTimeout(async () => {
-        const ok = await fetchState();
-        if (ok) {
-          pollAttempt = Math.max(0, pollAttempt - 1);
-          if (pollAttempt <= 0 && !evtSource) connectEventSource();
-        } else {
-          pollAttempt = Math.min(4, pollAttempt + 1);
+    const currentGeneration = generation;
+    inFlight = requestJson(`/api/state?${qs()}&connection_id=${encodeURIComponent(getConnectionId())}`)
+      .then(data => {
+        if (currentGeneration === generation) applyState(data);
+        return data;
+      })
+      .catch(error => {
+        if (currentGeneration === generation && !destroyed) {
+          log(`State request: ${error.code || error.message}`);
+          status(error.status === 404 ? "Game no longer available." : "Reconnecting…");
         }
-        attempt();
-      }, delay);
-    };
-    pollAttempt = 0;
-    attempt();
+        return null;
+      })
+      .finally(() => {
+        if (currentGeneration !== generation) return;
+        inFlight = null;
+        if (fetchAgain && !destroyed && !suspended) {
+          fetchAgain = false;
+          scheduleFetch();
+        }
+      });
+    return inFlight;
   }
 
-  function connectEventSource() {
-    if (destroyed || evtSource) return;
-    evtSource = new EventSource(`/events/${encodeURIComponent(roomId)}`);
-    evtSource.onmessage = () => scheduleFetch();
-    evtSource.onerror = () => startPollingFallback();
+  function scheduleFetch() {
+    if (fetchTimer || destroyed || suspended) return;
+    fetchTimer = setTimeout(() => { fetchTimer = null; fetchState(); }, 30);
   }
+
+  function reconnect() {
+    evtSource?.close();
+    evtSource = null;
+    if (destroyed || suspended || reconnectTimer) return;
+    reconnectTimer = setTimeout(() => {
+      reconnectTimer = null;
+      connectEvents();
+    }, retryDelay + Math.random() * 100);
+    retryDelay = Math.min(1500, retryDelay * 2);
+  }
+
+  function connectEvents() {
+    if (destroyed || suspended || evtSource) return;
+    const source = new EventSource(`/events/${encodeURIComponent(roomId)}`);
+    evtSource = source;
+    lastStream = Date.now();
+    const alive = () => {
+      if (source !== evtSource) return;
+      lastStream = Date.now();
+      retryDelay = 250;
+    };
+    source.onopen = () => { alive(); scheduleFetch(); };
+    source.addEventListener("ping", alive);
+    source.onmessage = () => { alive(); scheduleFetch(); };
+    source.onerror = () => { if (source === evtSource) reconnect(); };
+  }
+
+  function resume() {
+    if (destroyed || document.hidden) return;
+    suspended = false;
+    fetchState();
+    connectEvents();
+  }
+
+  function suspend() {
+    suspended = true;
+    evtSource?.close();
+    evtSource = null;
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
+
+  async function deliver(command) {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      if (destroyed || suspended) throw new Error("Connection is paused");
+      try {
+        const data = await requestJson(`${command.path}?${qs()}`, {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(command.body),
+        });
+        if (command.body.action_id && data.ack?.action_id !== command.body.action_id) {
+          throw new Error("Action acknowledgement missing");
+        }
+        command.acknowledged = true;
+        applyState(data);
+        return data;
+      } catch (error) {
+        if (error.status && error.status < 500 && error.status !== 408 && error.status !== 429) {
+          await fetchState();
+          throw error;
+        }
+        if (attempt === 1) {
+          status("Action not confirmed. Reconnecting…");
+          scheduleFetch();
+          throw error;
+        }
+        await new Promise(resolve => setTimeout(resolve, 150 + Math.random() * 100));
+      }
+    }
+  }
+
+  window.addEventListener("online", resume);
+  window.addEventListener("pageshow", resume);
+  window.addEventListener("pagehide", suspend);
+  const visibilityChanged = () => document.hidden ? suspend() : resume();
+  document.addEventListener("visibilitychange", visibilityChanged);
 
   return {
     connect(rid, pid) {
+      generation += 1;
       roomId = rid;
       playerId = pid;
-      localVersion = 0;
+      localVersion = -1;
+      latestState = null;
       destroyed = false;
-      return fetchState()
-        .then(() => connectEventSource())
-        .catch((e) => {
-          console.error("connect failed:", e);
-          connectEventSource();
-        });
+      suspended = false;
+      inFlight = null;
+      fetchAgain = false;
+      latestGuess = null;
+      clearInterval(pollTimer);
+      connectEvents();
+      // This bounded safety reconciliation also renews the player's presence lease.
+      pollTimer = setInterval(() => {
+        if (suspended || destroyed) return;
+        fetchState();
+        if (Date.now() - lastStream > 3000) reconnect();
+      }, 2000);
+      return fetchState();
     },
 
-    async postAction(path, body = {}) {
-      const url = `${path}?${qs()}`;
-      const r = await fetch(url, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ...body, connection_id: getConnectionId() }),
+    postAction(path, body = {}) {
+      const reliable = ["/api/place_guess", "/api/submit", "/api/agree_next"].includes(path);
+      if (reliable && !latestState) return Promise.reject(new Error("Waiting for game state"));
+      const sequence = Number(sessionStorage.getItem("ggg_action_sequence") || 0) + 1;
+      sessionStorage.setItem("ggg_action_sequence", sequence);
+      const command = { path, body: {
+        ...body, connection_id: getConnectionId(),
+        ...(reliable ? { action_id: crypto.randomUUID(), sequence, round: latestState.round } : {}),
+      } };
+      if (path === "/api/place_guess") latestGuess = command;
+      const requiredGuess = path === "/api/submit" ? latestGuess : null;
+      const task = actionQueue.catch(() => {}).then(async () => {
+        if (requiredGuess && !requiredGuess.acknowledged) await deliver(requiredGuess);
+        return deliver(command);
       });
-      const data = await r.json();
-      if (data.error) throw new Error(data.code || data.error);
-      applyStateIfNewer(data);
-      scheduleFetch(100);
-      return data;
+      actionQueue = task;
+      return task;
     },
 
     fetchState,
-
-    onState(cb) {
-      onStateCb = cb;
-    },
-
-    onLog(cb) {
-      onLogCb = cb;
-    },
-
+    onState(cb) { onStateCb = cb; },
+    onLog(cb) { onLogCb = cb; },
+    onStatus(cb) { onStatusCb = cb; },
     destroy() {
       destroyed = true;
-      if (evtSource) evtSource.close();
-      if (fetchTimer) clearTimeout(fetchTimer);
-      if (pollTimer) clearTimeout(pollTimer);
+      generation += 1;
+      suspend();
+      clearInterval(pollTimer);
+      clearTimeout(fetchTimer);
+      window.removeEventListener("online", resume);
+      window.removeEventListener("pageshow", resume);
+      window.removeEventListener("pagehide", suspend);
+      document.removeEventListener("visibilitychange", visibilityChanged);
     },
   };
 }

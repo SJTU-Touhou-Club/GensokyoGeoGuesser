@@ -13,7 +13,7 @@ _lock = threading.Lock()
 
 
 def subscribe(room_id: str) -> queue.Queue:
-    q: queue.Queue = queue.Queue()
+    q: queue.Queue = queue.Queue(maxsize=32)
     with _lock:
         _event_queues.setdefault(room_id, []).append(q)
     return q
@@ -24,6 +24,8 @@ def unsubscribe(room_id: str, q: queue.Queue) -> None:
         queues = _event_queues.get(room_id, [])
         if q in queues:
             queues.remove(q)
+        if not queues:
+            _event_queues.pop(room_id, None)
 
 
 def broadcast(room_id: str, event: str, payload: Optional[dict] = None) -> None:
@@ -33,10 +35,11 @@ def broadcast(room_id: str, event: str, payload: Optional[dict] = None) -> None:
     for q in queues:
         try:
             if payload is not None:
-                q.put(("event", event, data))
+                q.put_nowait(("event", event, data))
             else:
-                q.put(("raw", event, None))
-        except Exception:
+                q.put_nowait(("raw", event, None))
+        except queue.Full:
+            # Heartbeat snapshots recover a slow client without unbounded buffering.
             pass
 
 
@@ -45,17 +48,24 @@ def set_broadcast_hook() -> None:
 
 
 def event_stream(room_id: str, q: queue.Queue):
-    store = get_lobby_store()
-    room = store.get_room(room_id)
-    if room:
-        snapshot = room.to_dict()
-        snapshot["countdown_remaining_seconds"] = room.countdown_remaining_seconds()
-        yield f"event: lobby_snapshot\ndata: {json.dumps(snapshot)}\n\n"
+    from neo.config import get_config
 
-    while True:
-        item = q.get()
-        kind, event, data = item
-        if kind == "event":
-            yield f"event: {event}\ndata: {data}\n\n"
-        else:
-            yield f"data: {event}\n\n"
+    interval = get_config().get("connection", {}).get("heartbeat_seconds", 1)
+    store = get_lobby_store()
+    try:
+        room = store.get_room(room_id)
+        if room:
+            snapshot = room.to_dict()
+            snapshot["countdown_remaining_seconds"] = room.countdown_remaining_seconds()
+            yield f"event: lobby_snapshot\ndata: {json.dumps(snapshot)}\n\n"
+        while True:
+            try:
+                kind, event, data = q.get(timeout=interval)
+                if kind == "event":
+                    yield f"event: {event}\ndata: {data}\n\n"
+                else:
+                    yield f"data: {event}\n\n"
+            except queue.Empty:
+                yield "event: ping\ndata: {}\n\n"
+    finally:
+        unsubscribe(room_id, q)

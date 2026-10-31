@@ -1,5 +1,7 @@
 import {
   getConnectionId,
+  requestJson,
+  prefetchImages,
   getStoredPlayerId,
   setStoredPlayerId,
 } from "./connection.js";
@@ -21,7 +23,13 @@ const ERROR_MESSAGES = {
 
 let evtSource = null;
 let heartbeatTimer = null;
-let reconnectDelay = 1000;
+let reconnectDelay = 250;
+let reconnectTimer = null;
+let heartbeatBusy = false;
+let lastLobbyStream = 0;
+let rejoining = false;
+let navigating = false;
+let roomRevision = -1;
 let currentRoom = null;
 let selfPlayerId = null;
 let isHost = false;
@@ -150,13 +158,9 @@ document.getElementById("status-close")?.addEventListener("click", () => {
 
 const MAP_CACHE_URLS = ["/media/map_v2.jpg", "/media/ref_map_v2.jpg"];
 
+let stopMapPrefetch = () => {};
 function warmMapCache() {
-  for (const url of MAP_CACHE_URLS) {
-    const img = new Image();
-    if ("fetchPriority" in img) img.fetchPriority = "low";
-    img.decoding = "async";
-    img.src = url;
-  }
+  if (!currentRoom && !document.hidden) stopMapPrefetch = prefetchImages(MAP_CACHE_URLS);
 }
 
 function ensureRefMapSrc() {
@@ -166,12 +170,9 @@ function ensureRefMapSrc() {
   if (img.getAttribute("src") !== src) img.src = src;
 }
 
-// Low-priority warm so match → game hits HTTP cache instead of a map burst.
-if ("requestIdleCallback" in window) {
-  requestIdleCallback(() => warmMapCache(), { timeout: 2500 });
-} else {
-  setTimeout(warmMapCache, 1200);
-}
+// Background transfers start after the page's critical resources finish loading.
+if (document.readyState === "complete") warmMapCache();
+else window.addEventListener("load", warmMapCache, { once: true });
 
 els.refMap?.addEventListener("click", () => {
   ensureRefMapSrc();
@@ -188,15 +189,17 @@ document.addEventListener("keydown", (e) => {
   }
 });
 
-async function post(path, body) {
-  const r = await fetch(path, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  const data = await r.json();
-  if (!r.ok) throw data;
-  return data;
+async function post(path, body, background = false) {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      return await requestJson(path, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body), background,
+      });
+    } catch (error) {
+      if (attempt || (error.status && error.status < 500)) throw error;
+    }
+  }
 }
 
 const lobbyCountdown = createSyncedCountdown({
@@ -234,6 +237,8 @@ function setHostOnlyVisible() {
 }
 
 function enterWaiting(data) {
+  if (currentRoom !== data.room_id) roomRevision = -1;
+  stopMapPrefetch();
   currentRoom = data.room_id;
   selfPlayerId = els.playerId.value.trim();
   isHost = data.is_host;
@@ -252,6 +257,12 @@ function enterWaiting(data) {
 
 function updateRoomUI(room) {
   if (!room) return;
+  if (room.revision != null && room.revision < roomRevision) return;
+  if (room.revision != null) roomRevision = room.revision;
+  if (room.status === "IN_GAME") {
+    redirectToGame(room.room_id || currentRoom);
+    return;
+  }
   if (selfPlayerId && Object.prototype.hasOwnProperty.call(room, "host_id")) {
     isHost = room.host_id === selfPlayerId;
   }
@@ -296,79 +307,99 @@ function updateRoomUI(room) {
 }
 
 function connectLobbySSE(url) {
-  if (evtSource) evtSource.close();
-  evtSource = new EventSource(url);
-  reconnectDelay = 1000;
-
-  evtSource.addEventListener("lobby_snapshot", (e) => {
-    const room = JSON.parse(e.data);
-    updateRoomUI(room);
+  evtSource?.close();
+  const source = new EventSource(url);
+  evtSource = source;
+  lastLobbyStream = Date.now();
+  const alive = () => {
+    if (evtSource !== source) return;
+    lastLobbyStream = Date.now();
+    reconnectDelay = 250;
+  };
+  source.onopen = alive;
+  source.addEventListener("ping", alive);
+  for (const name of ["lobby_snapshot", "lobby_update"]) {
+    source.addEventListener(name, event => {
+      if (evtSource !== source) return;
+      alive();
+      try { updateRoomUI({ room_id: currentRoom, ...JSON.parse(event.data) }); }
+      catch (error) { showError(error.message); }
+    });
+  }
+  source.addEventListener("match_starting", event => {
+    if (evtSource === source) redirectToGame(JSON.parse(event.data).room_id);
   });
-
-  evtSource.addEventListener("lobby_update", (e) => {
-    const partial = JSON.parse(e.data);
-    const room = {
-      room_id: currentRoom,
-      host_id:
-        partial.host_id !== undefined ? partial.host_id : els.wrHost.textContent,
-      min_players: partial.min_players,
-      max_players: partial.max_players,
-      rounds: partial.rounds,
-      difficulty: partial.difficulty,
-      scoring_strategy: partial.scoring_strategy,
-      players: partial.players,
-      spectators: partial.spectators,
-      status: partial.status,
-      countdown_deadline: partial.countdown_deadline,
-      countdown_remaining_seconds: partial.countdown_remaining_seconds,
-    };
-    updateRoomUI(room);
-  });
-
-  evtSource.addEventListener("match_starting", (e) => {
-    const data = JSON.parse(e.data);
-    redirectToGame(data.room_id);
-  });
-
-  evtSource.onerror = () => {
-    evtSource.close();
+  source.onerror = () => {
+    if (evtSource !== source) return;
+    source.close();
     evtSource = null;
-    setTimeout(() => {
-      if (currentRoom && selfPlayerId) {
-        connectLobbySSE(
-          `/events/lobby/${encodeURIComponent(currentRoom)}?player_id=${encodeURIComponent(selfPlayerId)}`
-        );
-        fetch(`/api/lobby/room_status?room_id=${encodeURIComponent(currentRoom)}`)
-          .then((r) => r.json())
-          .then((data) => {
-            if (data.game_settings) applyGameSettings(data.game_settings);
-            if (data.player_limits) applyPlayerLimitBounds(data.player_limits);
-            updateRoomUI(data);
-          })
-          .catch(() => {});
-      }
-    }, reconnectDelay);
-    reconnectDelay = Math.min(30000, reconnectDelay * 2);
+    if (reconnectTimer) return;
+    reconnectTimer = setTimeout(() => {
+      reconnectTimer = null;
+      if (currentRoom && !document.hidden) connectLobbySSE(lobbyEventUrl());
+    }, reconnectDelay + Math.random() * 100);
+    reconnectDelay = Math.min(1500, reconnectDelay * 2);
   };
 }
 
-function startHeartbeat() {
-  if (heartbeatTimer) clearInterval(heartbeatTimer);
-  heartbeatTimer = setInterval(() => {
-    if (!currentRoom) return;
-    post("/api/lobby/heartbeat", {
-      room_id: currentRoom,
-      player_id: selfPlayerId,
-      connection_id: getConnectionId(),
-    })
-      .then((data) => {
-        if (data.status) {
-          syncLobbyCountdown(data);
-        }
-      })
-      .catch(() => {});
-  }, 5000);
+function lobbyEventUrl() {
+  return `/events/lobby/${encodeURIComponent(currentRoom)}?player_id=${encodeURIComponent(selfPlayerId)}`;
 }
+
+async function heartbeat() {
+  if (!currentRoom || heartbeatBusy || document.hidden || navigating) return;
+  heartbeatBusy = true;
+  const roomId = currentRoom;
+  try {
+    const data = await post("/api/lobby/heartbeat", {
+      room_id: roomId, player_id: selfPlayerId, connection_id: getConnectionId(),
+    }, true);
+    if (currentRoom !== roomId) return;
+    if (data.present === false && !rejoining) {
+      rejoining = true;
+      try {
+        const joined = await post(role === "spectator" ? "/api/lobby/observe" : "/api/lobby/join", {
+          room_id: roomId, player_id: selfPlayerId, connection_id: getConnectionId(),
+          min_players: Number(els.minPlayers.value), max_players: Number(els.maxPlayers.value),
+          rounds: Number(els.rounds.value), difficulty: els.difficulty.value,
+          scoring_strategy: els.scoringStrategy.value,
+        });
+        if (currentRoom === roomId) enterWaiting(joined);
+      } finally { rejoining = false; }
+    } else if (data.room) {
+      updateRoomUI(data.room);
+    }
+  } catch (error) {
+    if (currentRoom === roomId) showError(error.code || "Reconnecting…");
+  } finally { heartbeatBusy = false; }
+  if (currentRoom && !navigating && Date.now() - lastLobbyStream > 3000) {
+    connectLobbySSE(lobbyEventUrl());
+  }
+}
+
+function startHeartbeat() {
+  clearInterval(heartbeatTimer);
+  heartbeatTimer = setInterval(heartbeat, 2000);
+}
+
+function resumeLobby() {
+  navigating = false;
+  if (currentRoom && !document.hidden) {
+    connectLobbySSE(lobbyEventUrl());
+    startHeartbeat();
+    heartbeat();
+  } else if (!currentRoom) warmMapCache();
+}
+
+window.addEventListener("online", resumeLobby);
+window.addEventListener("pageshow", resumeLobby);
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) {
+    evtSource?.close();
+    evtSource = null;
+    clearInterval(heartbeatTimer);
+  } else resumeLobby();
+});
 
 async function pushRoomSettings() {
   if (!currentRoom || !isHost || syncingSettings) return;
@@ -397,7 +428,7 @@ async function pushRoomSettings() {
     updateRoomUI(data.room);
   } catch (e) {
     syncSettingsInputs(lastRoomSettings);
-    showError(e.code || e.error);
+    showError(e.code || e.message || e.error);
   }
 }
 
@@ -418,6 +449,7 @@ els.scoringStrategy.addEventListener("change", () => {
 });
 
 async function joinRoom(solo = false) {
+  stopMapPrefetch();
   const player_id = els.playerId.value.trim() ||
     (solo ? `solo-${crypto.randomUUID().slice(0, 12)}` : "");
   els.playerId.value = player_id;
@@ -443,7 +475,7 @@ async function joinRoom(solo = false) {
     } : null;
     enterWaiting(data);
   } catch (e) {
-    showError(e.code || e.error);
+    showError(e.code || e.message || e.error);
     els.join.disabled = false;
     els.solo.disabled = false;
     els.observe.disabled = false;
@@ -470,7 +502,7 @@ els.observe.addEventListener("click", async () => {
     });
     enterWaiting(data);
   } catch (e) {
-    showError(e.code || e.error);
+    showError(e.code || e.message || e.error);
     els.observe.disabled = false;
   }
 });
@@ -487,6 +519,9 @@ els.cancel.addEventListener("click", async () => {
   if (heartbeatTimer) clearInterval(heartbeatTimer);
   lobbyCountdown.stop();
   currentRoom = null;
+  roomRevision = -1;
+  clearTimeout(reconnectTimer);
+  reconnectTimer = null;
   if (soloLimits) {
     els.minPlayers.value = soloLimits.min;
     els.maxPlayers.value = soloLimits.max;
@@ -502,6 +537,11 @@ els.cancel.addEventListener("click", async () => {
 });
 
 function redirectToGame(roomId) {
+  if (navigating) return;
+  navigating = true;
+  stopMapPrefetch();
+  evtSource?.close();
+  clearInterval(heartbeatTimer);
   const observeParam = role === "spectator" ? "&observe=1" : "";
   window.location.href = `/index.html?room=${encodeURIComponent(roomId)}&player_id=${encodeURIComponent(selfPlayerId)}${observeParam}`;
 }
@@ -517,16 +557,15 @@ els.start?.addEventListener("click", async () => {
     redirectToGame(currentRoom);
   } catch (e) {
     els.start.disabled = false;
-    showError(e.code || e.error);
+    showError(e.code || e.message || e.error);
   }
 });
 
 window.addEventListener("pagehide", () => {
-  if (!currentRoom) return;
-  const payload = JSON.stringify({
-    room_id: currentRoom,
-    player_id: selfPlayerId,
-    connection_id: getConnectionId(),
-  });
-  navigator.sendBeacon("/api/lobby/leave", new Blob([payload], { type: "application/json" }));
+  evtSource?.close();
+  evtSource = null;
+  clearInterval(heartbeatTimer);
+  clearTimeout(reconnectTimer);
+  reconnectTimer = null;
+  // Membership is retained for the server's reconnect grace period.
 });

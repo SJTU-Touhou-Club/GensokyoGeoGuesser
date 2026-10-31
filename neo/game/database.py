@@ -63,6 +63,10 @@ class RoomState:
     category_sampler: object = None
     question_sampler: object = None
     dmg_mult_selector: object = None
+    connection_seen: dict[str, dict[str, float]] = field(default_factory=dict)
+    disconnect_since: dict[str, float] = field(default_factory=dict)
+    action_acks: dict[tuple[str, str, str], dict] = field(default_factory=dict)
+    action_sequences: dict[tuple[str, str, int], int] = field(default_factory=dict)
     lock: threading.RLock = field(default_factory=threading.RLock)
 
     def bump_version(self) -> None:
@@ -313,3 +317,14 @@ def add_debug_log(room_id: str, level: str, message: str) -> None:
     room.debug_log.append(entry)
     if len(room.debug_log) > 200:
         room.debug_log = room.debug_log[-200:]
+
+
+@room_lock_guard
+def next_question_image(room_id: str) -> str | None:
+    room = get_room(room_id)
+    if room.phase == Phase.GAME_OVER or not has_next_round(room_id):
+        return None
+    target = room.round_index + 1
+    while len(room.que_history) <= target:
+        sample_question(room_id)
+    return que_db[room.que_history[target]].image_path

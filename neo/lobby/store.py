@@ -22,6 +22,7 @@ class LobbyPlayer:
     connected: bool = True
     joined_at: float = field(default_factory=time.time)
     last_heartbeat: float = field(default_factory=time.time)
+    connection_seen: dict[str, float] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return {
@@ -37,6 +38,7 @@ class LobbySpectator:
     player_id: str
     connection_ids: Set[str] = field(default_factory=set)
     last_heartbeat: float = field(default_factory=time.time)
+    connection_seen: dict[str, float] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return {
@@ -48,6 +50,7 @@ class LobbySpectator:
 @dataclass
 class LobbyRoom:
     room_id: str
+    revision: int = 0
     status: LobbyStatus = LobbyStatus.WAITING
     host_id: str = ""
     min_players: int = 2
@@ -66,6 +69,7 @@ class LobbyRoom:
     def to_dict(self) -> dict:
         return {
             "room_id": self.room_id,
+            "revision": self.revision,
             "status": self.status.value,
             "host_id": self.host_id,
             "min_players": self.min_players,
@@ -142,6 +146,7 @@ class InMemoryLobbyStore(LobbyStore):
         return self._rooms.get(room_id)
 
     def save_room(self, room: LobbyRoom) -> None:
+        room.revision += 1
         self._rooms[room.room_id] = room
 
     def delete_room(self, room_id: str) -> None:

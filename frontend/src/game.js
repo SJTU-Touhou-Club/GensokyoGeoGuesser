@@ -1,4 +1,4 @@
-import { getConnectionId } from "./connection.js";
+import { prefetchImages } from "./connection.js";
 import { createSyncScheduler } from "./sync.js";
 import { createMapController } from "./map.js";
 import { renderLeaderboard } from "./leaderboard.js";
@@ -70,6 +70,8 @@ if (observe) {
 
 const refOverlay = document.getElementById("ref-overlay");
 document.getElementById("refmap-btn")?.addEventListener("click", () => {
+  const image = refOverlay.querySelector("img");
+  if (!image.src) image.src = image.dataset.src;
   refOverlay.classList.add("open");
 });
 refOverlay?.addEventListener("click", () => refOverlay.classList.remove("open"));
@@ -81,14 +83,56 @@ document.getElementById("back-lobby")?.addEventListener("click", () => {
   window.location.href = "/lobby";
 });
 
+let pendingImageState = null;
+let questionUrl = "";
+let imageAttempts = 0;
+let imageRetry = null;
+const questionImage = document.getElementById("question-img");
+const mapImage = document.getElementById("map");
+
+function prefetchUpcomingImage() {
+  if (!pendingImageState || !questionImage.complete || !questionImage.naturalWidth ||
+      !mapImage.complete || !mapImage.naturalWidth) return;
+  prefetchImages([
+    pendingImageState.prefetch_question_img ? `/${pendingImageState.prefetch_question_img}` : null,
+    "/media/ref_map_v2.jpg",
+  ]);
+}
+questionImage.addEventListener("load", prefetchUpcomingImage);
+mapImage.addEventListener("load", prefetchUpcomingImage);
+questionImage.addEventListener("error", () => {
+  clearTimeout(imageRetry);
+  const failedUrl = questionUrl;
+  if (imageAttempts++ < 2) {
+    imageRetry = setTimeout(() => {
+      if (questionUrl === failedUrl) questionImage.src = failedUrl;
+    }, 500 * imageAttempts);
+  } else {
+    questionImage.alt = "Image unavailable. Tap to retry.";
+  }
+});
+questionImage.addEventListener("click", () => {
+  if (!questionImage.naturalWidth && questionUrl) {
+    imageAttempts = 0;
+    questionImage.src = questionUrl;
+  }
+});
+
 function updateUI(state) {
   if (state.pin_colors) map.setPinColors(state.pin_colors);
   map.render(state);
   renderLeaderboard(document.getElementById("leaderboard"), state, playerId);
   hud.update(state);
 
-  const qImg = document.getElementById("question-img");
-  if (state.question_img) qImg.src = `/${state.question_img}`;
+  pendingImageState = state;
+  if (state.question_img && questionUrl !== `/${state.question_img}`) {
+    questionUrl = `/${state.question_img}`;
+    clearTimeout(imageRetry);
+    imageAttempts = 0;
+    questionImage.alt = "Question";
+    questionImage.src = questionUrl;
+  }
+  prefetchUpcomingImage();
 
   const comment = document.getElementById("question-comment");
   if (state.question_comment) {
@@ -121,20 +165,15 @@ function updateUI(state) {
   debugPanel.update(state);
 }
 
+scheduler.onStatus(message => {
+  const banner = document.getElementById("connection-status");
+  banner.textContent = message;
+  banner.hidden = !message;
+});
 scheduler.onState(updateUI);
 scheduler.onLog((msg) => debugPanel.log(msg));
 
 scheduler.connect(room, playerId).catch(() => {
   alert("Room not found. Return to lobby.");
   window.location.href = "/lobby";
-});
-
-window.addEventListener("pagehide", () => {
-  const payload = JSON.stringify({
-    connection_id: getConnectionId(),
-  });
-  navigator.sendBeacon(
-    `/api/exit?room=${encodeURIComponent(room)}&player_id=${encodeURIComponent(playerId)}`,
-    new Blob([payload], { type: "application/json" })
-  );
 });

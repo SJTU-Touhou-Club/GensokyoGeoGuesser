@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+
 from flask import Blueprint, Response, jsonify, request
 
 from neo.config import is_debug
@@ -42,7 +44,7 @@ def _is_observe() -> bool:
     return request.args.get("observe") == "1"
 
 
-def _get_state_response(room_id: str, player_id: str):
+def _get_state_response(room_id: str, player_id: str, ack: dict | None = None):
     if not db.room_exists(room_id):
         return _error("Room not found", "ROOM_NOT_FOUND", 404)
     observe = _is_observe() or _is_spectator(room_id, player_id)
@@ -54,10 +56,14 @@ def _get_state_response(room_id: str, player_id: str):
             return _error("Player not in room", "NOT_IN_ROOM", 403)
     engine.check_timeouts(room_id)
     state = build_state(room_id, player_id, observe_mode=observe)
+    if ack is not None:
+        state["ack"] = ack
     if room.phase == Phase.GAME_OVER:
         store = get_lobby_store()
         store.delete_room(room_id)
-    return jsonify(state)
+    response = jsonify(state)
+    response.headers["Cache-Control"] = "no-store"
+    return response
 
 
 @bp.route("/api/state")
@@ -74,60 +80,83 @@ def get_state():
     return _get_state_response(room_id, player_id)
 
 
-@bp.route("/api/place_guess", methods=["POST"])
-def place_guess():
+def _apply_action(action: str):
     room_id, player_id, err = _parse_query()
     if err:
         return err
     if _is_spectator(room_id, player_id) or _is_observe():
         return _error("Spectators cannot mutate state", "SPECTATOR_READONLY", 403)
     data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return _error("Invalid action payload", "INVALID_ACTION", 400)
     try:
-        engine.check_timeouts(room_id)
-        engine.place_guess(room_id, player_id, data.get("lat"), data.get("lon"))
+        room = db.get_room(room_id)
+        with room.lock:
+            if player_id not in room.player_ids:
+                return _error("Player not in room", "NOT_IN_ROOM", 403)
+            connection_id = data.get("connection_id")
+            action_id = data.get("action_id")
+            ack = None
+            if action_id is not None:
+                if (
+                    not isinstance(action_id, str) or not 1 <= len(action_id) <= 80
+                    or not isinstance(connection_id, str) or not 1 <= len(connection_id) <= 80
+                ):
+                    return _error("Invalid action identity", "INVALID_ACTION", 400)
+                if type(data.get("round")) is not int or type(data.get("sequence")) is not int:
+                    return _error("Missing round or sequence", "INVALID_ACTION", 400)
+                key = (player_id, connection_id, action_id)
+                signature = (action, data["round"], data["sequence"], data.get("lat"), data.get("lon"))
+                cached = room.action_acks.get(key)
+                if cached:
+                    if cached["signature"] != signature:
+                        return _error("Action id reused", "ACTION_CONFLICT", 409)
+                    return _get_state_response(room_id, player_id, cached["ack"])
+                engine.check_timeouts(room_id)
+                if data["round"] != room.round_index + 1:
+                    return _error("Round changed; refresh state", "STALE_ROUND", 409)
+                sequence_key = (player_id, connection_id, room.round_index)
+                if data["sequence"] <= room.action_sequences.get(sequence_key, -1):
+                    return _error("Action superseded", "STALE_ACTION", 409)
+            else:
+                engine.check_timeouts(room_id)
+            if connection_id:
+                engine.register_connection(room_id, player_id, connection_id)
+            if action == "place_guess":
+                lat, lon = data.get("lat"), data.get("lon")
+                if any(type(v) not in (int, float) or not math.isfinite(v) or not 0 <= v <= 1 for v in (lat, lon)):
+                    return _error("Invalid coordinates", "INVALID_COORD", 400)
+                engine.place_guess(room_id, player_id, lat, lon)
+            elif action == "submit":
+                engine.submit(room_id, player_id)
+            else:
+                engine.agree_next(room_id, player_id)
+            if action_id is not None:
+                ack = {"action_id": action_id, "sequence": data["sequence"], "round": data["round"]}
+                room.action_sequences[sequence_key] = data["sequence"]
+                room.action_acks[key] = {"signature": signature, "ack": ack}
+                while len(room.action_acks) > 256:
+                    room.action_acks.pop(next(iter(room.action_acks)))
+            return _get_state_response(room_id, player_id, ack)
     except KeyError:
         return _error("Room not found", "ROOM_NOT_FOUND", 404)
-    except PhaseError as e:
-        return _error(e.message or e.code, e.code, e.http_status)
     except GameError as e:
         return _error(e.message or e.code, e.code, e.http_status)
-    return _get_state_response(room_id, player_id)
+
+
+@bp.route("/api/place_guess", methods=["POST"])
+def place_guess():
+    return _apply_action("place_guess")
 
 
 @bp.route("/api/submit", methods=["POST"])
 def submit():
-    room_id, player_id, err = _parse_query()
-    if err:
-        return err
-    if _is_spectator(room_id, player_id) or _is_observe():
-        return _error("Spectators cannot mutate state", "SPECTATOR_READONLY", 403)
-    try:
-        engine.check_timeouts(room_id)
-        engine.submit(room_id, player_id)
-    except KeyError:
-        return _error("Room not found", "ROOM_NOT_FOUND", 404)
-    except PhaseError as e:
-        return _error(e.message or e.code, e.code, e.http_status)
-    except GameError as e:
-        return _error(e.message or e.code, e.code, e.http_status)
-    return _get_state_response(room_id, player_id)
+    return _apply_action("submit")
 
 
 @bp.route("/api/agree_next", methods=["POST"])
 def agree_next():
-    room_id, player_id, err = _parse_query()
-    if err:
-        return err
-    if _is_spectator(room_id, player_id) or _is_observe():
-        return _error("Spectators cannot mutate state", "SPECTATOR_READONLY", 403)
-    try:
-        engine.check_timeouts(room_id)
-        engine.agree_next(room_id, player_id)
-    except KeyError:
-        return _error("Room not found", "ROOM_NOT_FOUND", 404)
-    except PhaseError as e:
-        return _error(e.message or e.code, e.code, e.http_status)
-    return _get_state_response(room_id, player_id)
+    return _apply_action("agree_next")
 
 
 @bp.route("/api/exit", methods=["POST"])
@@ -193,6 +222,8 @@ def prev_round():
 @bp.route("/events/<room_id>")
 def events(room_id: str):
     q = game_sse.subscribe(room_id)
-    response = Response(game_sse.event_stream(q), mimetype="text/event-stream")
+    response = Response(game_sse.event_stream(q, room_id), mimetype="text/event-stream")
+    response.headers["Cache-Control"] = "no-cache, no-store"
+    response.headers["X-Accel-Buffering"] = "no"
     response.call_on_close(lambda: game_sse.unsubscribe(room_id, q))
     return response
