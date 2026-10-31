@@ -266,6 +266,8 @@ def _find_or_create_quick_room(store, min_p: int, max_p: int) -> tuple[str, bool
             if (
                 room
                 and room.status in (LobbyStatus.WAITING, LobbyStatus.COUNTDOWN)
+                and room.min_players == min_p
+                and room.max_players == max_p
                 and len(room.players) < room.max_players
             ):
                 return rid, True
@@ -484,6 +486,8 @@ def _prune_stale_connections(room: LobbyRoom, timeout: float) -> None:
 
 def _evaluate_waiting(room: LobbyRoom) -> None:
     n = len(room.players)
+    if room.min_players == 1 and room.max_players == 1:
+        return
     if n >= room.max_players:
         _begin_starting(room)
         return

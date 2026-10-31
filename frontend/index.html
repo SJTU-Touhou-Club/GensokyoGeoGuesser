@@ -8,14 +8,16 @@
     <link rel="stylesheet" href="/src/styles.css" />
   </head>
   <body>
-    <h1>Gensokyo Geo-Guesser</h1>
     <div id="observe-banner">Spectating — read only</div>
 
     <div id="game-area">
       <div id="left-panel">
         <div id="map-container">
-          <img id="map" src="/media/map_v2.jpg" alt="Gensokyo Map" />
-          <svg id="map-overlay" viewBox="0 0 100 100" preserveAspectRatio="none"></svg>
+          <div id="map-sizer" aria-hidden="true"></div>
+          <div id="map-content">
+            <img id="map" src="/media/map_v2.jpg" alt="Gensokyo Map" draggable="false" />
+            <svg id="map-overlay" viewBox="0 0 100 100" preserveAspectRatio="none"></svg>
+          </div>
         </div>
         <div class="map-credit">
           We give acknowledgement to MC幻想郷 circle for kindly sharing their map.
@@ -23,6 +25,7 @@
       </div>
 
       <div id="right-panel">
+        <h1 class="game-title">Gensokyo Geo-Guesser</h1>
         <h2 class="panel-title">
           Round <span id="round-current" class="badge-round">?</span> /
           <span id="round-max" class="badge-round secondary">?</span>
@@ -34,7 +37,7 @@
         </div>
         <div id="leaderboard"></div>
         <div class="controls inline">
-          <button id="refmap-btn" type="button">reference map</button>
+          <button id="refmap-btn" type="button">Reference Map</button>
         </div>
         <div class="controls inline">
           <button id="submit-btn" type="button" disabled>Submit</button>

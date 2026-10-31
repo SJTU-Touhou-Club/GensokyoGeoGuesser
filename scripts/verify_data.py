@@ -32,6 +32,10 @@ def _load_questions(path: Path) -> list[dict[str, str]]:
             parts = [p.strip() for p in line.split(",")]
             if len(parts) < 4:
                 continue
+            try:
+                int(parts[0])
+            except ValueError:
+                continue
             rows.append(
                 {
                     "id": parts[0],

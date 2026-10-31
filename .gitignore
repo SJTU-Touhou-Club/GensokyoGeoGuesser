@@ -3,6 +3,8 @@
 __pycache__/
 *.pyc
 .pytest_cache/
+.venv/
+/.envrc
 frontend/node_modules/
 frontend/package-lock.json
 
@@ -10,3 +12,5 @@ frontend/package-lock.json
 static/dataset/
 static/media/
 static/dist/
+
+.DS_Store

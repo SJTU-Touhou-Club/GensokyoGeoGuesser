@@ -42,6 +42,7 @@ let lastRoomSettings = {
   scoring_strategy: "ranking",
 };
 let syncingSettings = false;
+let soloLimits = null;
 
 const els = {
   playerId: document.getElementById("player-id"),
@@ -52,6 +53,7 @@ const els = {
   difficulty: document.getElementById("difficulty"),
   scoringStrategy: document.getElementById("scoring-strategy"),
   join: document.getElementById("btn-join"),
+  solo: document.getElementById("btn-solo"),
   observe: document.getElementById("btn-observe"),
   refMap: document.getElementById("btn-refmap"),
   cancel: document.getElementById("btn-cancel"),
@@ -217,7 +219,7 @@ function syncLobbyCountdown(room) {
 
 function setHostOnlyVisible() {
   document.querySelectorAll(".host-only").forEach((el) => {
-    if (!isHost) {
+    if (!isHost || (el.id === "minmax-row" && soloLimits)) {
       el.style.display = "none";
       return;
     }
@@ -241,6 +243,7 @@ function enterWaiting(data) {
   els.waiting.style.display = "block";
   els.cancel.style.display = "";
   els.join.disabled = true;
+  els.solo.disabled = true;
   els.observe.disabled = true;
   updateRoomUI(data.room);
   connectLobbySSE(data.sse_url);
@@ -269,7 +272,9 @@ function updateRoomUI(room) {
   const n = (room.players || []).length;
   const min = room.min_players;
   let text = "";
-  if (status === "WAITING" && n < min) {
+  if (status === "WAITING" && room.max_players === 1) {
+    text = "Solo ready. Choose your settings, then press Start Game Now.";
+  } else if (status === "WAITING" && n < min) {
     text = `Waiting for players… (need at least ${min})`;
   } else if (status === "WAITING") {
     text = "Minimum reached. Waiting for host or more players.";
@@ -412,28 +417,41 @@ els.scoringStrategy.addEventListener("change", () => {
   pushRoomSettings();
 });
 
-els.join.addEventListener("click", async () => {
-  const player_id = els.playerId.value.trim();
+async function joinRoom(solo = false) {
+  const player_id = els.playerId.value.trim() ||
+    (solo ? `solo-${crypto.randomUUID().slice(0, 12)}` : "");
+  els.playerId.value = player_id;
   setStoredPlayerId(player_id);
   els.join.disabled = true;
+  els.solo.disabled = true;
+  els.observe.disabled = true;
   try {
-    const room_id = els.roomId.value.trim() || null;
+    const room_id = solo ? `solo_${crypto.randomUUID()}` : els.roomId.value.trim() || null;
     const data = await post("/api/lobby/join", {
       room_id,
       player_id,
       connection_id: getConnectionId(),
-      min_players: Number(els.minPlayers.value),
-      max_players: Number(els.maxPlayers.value),
+      min_players: solo ? 1 : Number(els.minPlayers.value),
+      max_players: solo ? 1 : Number(els.maxPlayers.value),
       rounds: Number(els.rounds.value),
       difficulty: els.difficulty.value,
       scoring_strategy: els.scoringStrategy.value,
     });
+    soloLimits = solo ? {
+      min: Number(els.minPlayers.value),
+      max: Number(els.maxPlayers.value),
+    } : null;
     enterWaiting(data);
   } catch (e) {
     showError(e.code || e.error);
     els.join.disabled = false;
+    els.solo.disabled = false;
+    els.observe.disabled = false;
   }
-});
+}
+
+els.join.addEventListener("click", () => joinRoom());
+els.solo.addEventListener("click", () => joinRoom(true));
 
 els.observe.addEventListener("click", async () => {
   const player_id = els.playerId.value.trim();
@@ -469,9 +487,17 @@ els.cancel.addEventListener("click", async () => {
   if (heartbeatTimer) clearInterval(heartbeatTimer);
   lobbyCountdown.stop();
   currentRoom = null;
+  if (soloLimits) {
+    els.minPlayers.value = soloLimits.min;
+    els.maxPlayers.value = soloLimits.max;
+    soloLimits = null;
+  }
+  isHost = false;
+  setHostOnlyVisible();
   els.waiting.style.display = "none";
   els.cancel.style.display = "none";
   els.join.disabled = false;
+  els.solo.disabled = false;
   els.observe.disabled = false;
 });
 

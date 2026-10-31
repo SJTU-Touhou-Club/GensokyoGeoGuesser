@@ -217,3 +217,44 @@ def test_quick_match_reuses_empty_room_assigns_host():
     assert get_lobby_store().get_room(room_id).host_id == "bob"
     result = lobby_service.update_room_settings(room_id, "bob", 2, 4)
     assert result["ok"] is True
+
+
+@pytest.mark.parametrize("scoring_strategy", ["ranking", "distance"])
+def test_solo_room_uses_host_settings(scoring_strategy):
+    result = lobby_service.join(
+        "solo_config", "alice", "c1", min_players=1, max_players=1,
+        rounds=3, difficulty="N", scoring_strategy=scoring_strategy,
+    )
+    room = get_lobby_store().get_room(result["room_id"])
+    assert room.status == LobbyStatus.WAITING
+    lobby_service.update_room_settings(
+        room.room_id, "alice", 1, 1, rounds=4, difficulty="L",
+        scoring_strategy=scoring_strategy,
+    )
+    assert room.status == LobbyStatus.WAITING
+    lobby_service.start(room.room_id, "alice")
+    game = db.get_room(room.room_id)
+    assert game.player_ids == ["alice"]
+    assert game.room_config["rounds"] == 4
+    assert game.room_config["difficulty"] == "L"
+    assert game.room_config["scoring_strategy"] == scoring_strategy
+
+
+def test_solo_rooms_are_separate_from_each_other_and_multiplayer():
+    multiplayer = lobby_service.join(None, "host", "c0")
+    first = lobby_service.join(
+        "solo_first", "solo-first", "c1", min_players=1, max_players=1,
+    )
+    second = lobby_service.join(
+        "solo_second", "solo-second", "c2", min_players=1, max_players=1,
+    )
+    guest = lobby_service.join(None, "guest", "c3")
+    assert guest["room_id"] == multiplayer["room_id"]
+    assert len({multiplayer["room_id"], first["room_id"], second["room_id"]}) == 3
+    for result in (first, second):
+        room = get_lobby_store().get_room(result["room_id"])
+        assert room.status == LobbyStatus.WAITING
+        assert len(room.players) == 1
+        with pytest.raises(LobbyError) as exc:
+            lobby_service.join(room.room_id, "intruder", "c4")
+        assert exc.value.code == "ROOM_FULL"
