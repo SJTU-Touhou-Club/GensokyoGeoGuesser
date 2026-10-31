@@ -1,6 +1,9 @@
 # Deploy GensokyoGeoGuesser Neo
 
-This guide describes how to deploy the app as a long-running service on this machine.
+This guide describes the current `dev` deployment. The maintained application,
+virtual environment, built assets, and service working directory are all under
+`/home/priv/apps/GensokyoGeoGuesser`. The archived code in `ref/` is not deployed.
+See the [project README](../../README.md) for local development and validation.
 
 ## Overview
 
@@ -13,7 +16,7 @@ Important: use one worker: room state is in memory. `app:create_app()` starts th
 
 ## Prerequisites
 
-- Python 3.8+ with `python3-venv` (`sudo apt install python3-venv`)
+- Python 3.12 with `python3-venv` (`sudo apt install python3-venv`)
 - Node.js and `npm` (build-time only)
 - `nginx`
 - DNS A/AAAA record: `ggg-neo.arthas.org` points to this server
@@ -27,6 +30,8 @@ Important: use one worker: room state is in memory. `app:create_app()` starts th
 
 ```bash
 cd /home/priv/apps/GensokyoGeoGuesser
+git switch dev
+git pull --ff-only origin dev
 ./install.sh
 ```
 
@@ -52,10 +57,10 @@ Optional smoke test:
 
 ```bash
 cd /home/priv/apps/GensokyoGeoGuesser
-.venv/bin/python app.py --port 20811
+.venv/bin/python app.py --host 127.0.0.1 --port 5000
 ```
 
-Then open `http://127.0.0.1:20811/lobby` from the server.
+Then open `http://127.0.0.1:5000/lobby` from the server. Port `20811` belongs to the production service.
 
 ## 2) Create systemd service (port 20811)
 
@@ -69,7 +74,8 @@ Install and start:
 ```bash
 sudo cp /home/priv/apps/GensokyoGeoGuesser/docs/deploy/ggg-neo.service /etc/systemd/system/ggg-neo.service
 sudo systemctl daemon-reload
-sudo systemctl enable --now ggg-neo
+sudo systemctl enable ggg-neo
+sudo systemctl restart ggg-neo
 sudo systemctl status ggg-neo
 ```
 
@@ -146,7 +152,11 @@ After pulling new code:
 
 ```bash
 cd /home/priv/apps/GensokyoGeoGuesser
+git switch dev
+git pull --ff-only origin dev
 ./install.sh        # re-uses existing .venv; installs any new deps
+sudo cp docs/deploy/ggg-neo.service /etc/systemd/system/ggg-neo.service
+sudo systemctl daemon-reload
 sudo systemctl restart ggg-neo
 ```
 
@@ -155,8 +165,9 @@ sudo systemctl restart ggg-neo
 ```mermaid
 flowchart LR
   Client --> Nginx443["nginx :443"]
-  Nginx443 --> Flask["python3 app.py :20811"]
-  Flask --> Static["static/dist + media"]
+  Nginx443 --> Gunicorn["Gunicorn: one worker, 32 threads :20811"]
+  Nginx443 --> Static["static/dist + media + dataset"]
+  Gunicorn --> Flask["app:create_app()"]
   Flask --> Memory["in-memory rooms"]
 ```
 
@@ -164,6 +175,7 @@ flowchart LR
 ## Stability validation
 
 ```bash
+.venv/bin/python -m pip install pytest
 .venv/bin/python -m pytest tests -q
 node --test tests/*.mjs
 npm --prefix frontend run build

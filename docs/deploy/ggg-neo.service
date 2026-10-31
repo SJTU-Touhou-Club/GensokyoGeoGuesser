@@ -1,5 +1,5 @@
 [Unit]
-Description=GensokyoGeoGuesser Neo Flask Service
+Description=GensokyoGeoGuesser Neo (dev, Gunicorn)
 After=network.target
 
 [Service]
@@ -7,7 +7,7 @@ Type=simple
 User=priv
 Group=priv
 WorkingDirectory=/home/priv/apps/GensokyoGeoGuesser
-ExecStart=/home/priv/apps/GensokyoGeoGuesser/.venv/bin/gunicorn --workers 1 --worker-class gthread --threads 32 --bind 127.0.0.1:20811 --timeout 0 --access-logfile - --error-logfile - app:create_app()
+ExecStart=/home/priv/apps/GensokyoGeoGuesser/.venv/bin/python -m gunicorn --chdir /home/priv/apps/GensokyoGeoGuesser --workers 1 --worker-class gthread --threads 32 --bind 127.0.0.1:20811 --timeout 0 --access-logfile - --error-logfile - app:create_app()
 Restart=on-failure
 RestartSec=5
 MemoryHigh=320M
