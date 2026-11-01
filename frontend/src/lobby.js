@@ -13,7 +13,8 @@ const ERROR_MESSAGES = {
   ROOM_FULL: "Room is full.",
   INVALID_PLAYER_ID: "Invalid player ID (1–32 characters).",
   NOT_HOST: "Only the host can start the game.",
-  ALREADY_IN_ROOM: "You are already in another room. Leave first.",
+  CONNECTION_REPLACED: "This room is open in another tab.",
+  MATCH_TIMEOUT: "Matching timed out.",
   ROOM_NOT_FOUND: "Room not found.",
   INVALID_PLAYER_LIMITS: "Player limits must be between 1 and the number of pin colors, with min ≤ max.",
   MAX_BELOW_PLAYER_COUNT: "Max players cannot be below the current player count.",
@@ -29,7 +30,6 @@ let reconnectTimer = null;
 let heartbeatBusy = false;
 let lastLobbyStream = 0;
 let lastLobbyHeartbeat = 0;
-let rejoining = false;
 let navigating = false;
 let roomRevision = -1;
 let currentRoom = null;
@@ -310,7 +310,9 @@ function updateRoomUI(room) {
 
 function connectLobbySSE(url) {
   evtSource?.close();
-  const source = new EventSource(url);
+  const eventUrl = new URL(url, location.href);
+  eventUrl.searchParams.set("connection_id", getConnectionId());
+  const source = new EventSource(eventUrl.href);
   evtSource = source;
   lastLobbyStream = Date.now();
   const alive = () => {
@@ -319,6 +321,20 @@ function connectLobbySSE(url) {
     reconnectDelay = 250;
   };
   source.onopen = alive;
+  source.addEventListener("membership_expired", () => {
+    if (evtSource === source) {
+      resetWaiting();
+      showError("MATCH_TIMEOUT");
+    }
+  });
+  source.addEventListener("connection_replaced", event => {
+    const data = JSON.parse(event.data);
+    if (evtSource === source && data.player_id === selfPlayerId &&
+        (!data.role || data.role === role) && data.connection_id !== getConnectionId()) {
+      resetWaiting();
+      showError("CONNECTION_REPLACED");
+    }
+  });
   source.addEventListener("ping", alive);
   for (const name of ["lobby_snapshot", "lobby_update"]) {
     source.addEventListener(name, event => {
@@ -361,20 +377,18 @@ async function heartbeat() {
     }, true);
     if (currentRoom !== roomId) return;
     if (els.statusText.textContent === "Reconnecting…") els.statusBar.style.display = "none";
-    if (data.present === false && !rejoining) {
-      rejoining = true;
-      try {
-        const joined = await post(role === "spectator" ? "/api/lobby/observe" : "/api/lobby/join", {
-          room_id: roomId, player_id: selfPlayerId, connection_id: getConnectionId(),
-          min_players: Number(els.minPlayers.value), max_players: Number(els.maxPlayers.value),
-          rounds: Number(els.rounds.value), difficulty: els.difficulty.value,
-          scoring_strategy: els.scoringStrategy.value,
-        });
-        if (currentRoom === roomId) enterWaiting(joined);
-      } finally { rejoining = false; }
-    } else if (data.room) {
-      updateRoomUI(data.room);
+    if (data.replaced) {
+      resetWaiting();
+      showError("CONNECTION_REPLACED");
+      return;
     }
+    if (data.present === false) {
+      const started = data.room && !["WAITING", "COUNTDOWN"].includes(data.room.status);
+      resetWaiting();
+      showError(started ? "ROOM_IN_GAME" : "MATCH_TIMEOUT");
+      return;
+    }
+    if (data.room) updateRoomUI(data.room);
   } catch (error) {
     if (currentRoom === roomId && (error.code || Date.now() - lastLobbyStream >= 3000)) {
       showError(error.code || "Reconnecting…");
@@ -429,6 +443,7 @@ async function pushRoomSettings() {
       player_id: selfPlayerId,
       min_players,
       max_players,
+      connection_id: getConnectionId(),
       rounds,
       difficulty,
       scoring_strategy,
@@ -524,7 +539,12 @@ els.cancel.addEventListener("click", async () => {
       connection_id: getConnectionId(),
     }).catch(() => {});
   }
+  resetWaiting();
+});
+
+function resetWaiting() {
   if (evtSource) evtSource.close();
+  evtSource = null;
   if (heartbeatTimer) clearInterval(heartbeatTimer);
   lobbyCountdown.stop();
   currentRoom = null;
@@ -543,7 +563,8 @@ els.cancel.addEventListener("click", async () => {
   els.join.disabled = false;
   els.solo.disabled = false;
   els.observe.disabled = false;
-});
+  els.start.disabled = false;
+}
 
 function redirectToGame(roomId) {
   if (navigating) return;
@@ -562,6 +583,7 @@ els.start?.addEventListener("click", async () => {
     await post("/api/lobby/start", {
       room_id: currentRoom,
       player_id: selfPlayerId,
+      connection_id: getConnectionId(),
     });
     redirectToGame(currentRoom);
   } catch (e) {

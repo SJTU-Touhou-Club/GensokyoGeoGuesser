@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import threading
 import time
-import uuid
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Dict, List, Optional, Set
@@ -106,10 +105,7 @@ class LobbyStore:
     def delete_room(self, room_id: str) -> None:
         raise NotImplementedError
 
-    def get_player_room(self, player_id: str) -> Optional[str]:
-        raise NotImplementedError
-
-    def set_player_room(self, player_id: str, room_id: Optional[str], role: str) -> None:
+    def acquire_matchmaking_lock(self):
         raise NotImplementedError
 
     def quick_pool_add(self, room_id: str) -> None:
@@ -128,10 +124,10 @@ class LobbyStore:
 class InMemoryLobbyStore(LobbyStore):
     def __init__(self):
         self._rooms: Dict[str, LobbyRoom] = {}
-        self._player_index: Dict[str, tuple[str, str]] = {}
         self._quick_pool: Set[str] = set()
         self._locks: Dict[str, threading.RLock] = {}
         self._global_lock = threading.Lock()
+        self._matchmaking_lock = threading.RLock()
 
     def _get_lock(self, room_id: str) -> threading.RLock:
         with self._global_lock:
@@ -150,23 +146,11 @@ class InMemoryLobbyStore(LobbyStore):
         self._rooms[room.room_id] = room
 
     def delete_room(self, room_id: str) -> None:
-        room = self._rooms.pop(room_id, None)
-        if room:
-            for p in room.players:
-                self._player_index.pop(p.player_id, None)
-            for s in room.spectators:
-                self._player_index.pop(s.player_id, None)
+        self._rooms.pop(room_id, None)
         self._quick_pool.discard(room_id)
 
-    def get_player_room(self, player_id: str) -> Optional[str]:
-        entry = self._player_index.get(player_id)
-        return entry[0] if entry else None
-
-    def set_player_room(self, player_id: str, room_id: Optional[str], role: str) -> None:
-        if room_id is None:
-            self._player_index.pop(player_id, None)
-        else:
-            self._player_index[player_id] = (room_id, role)
+    def acquire_matchmaking_lock(self):
+        return self._matchmaking_lock
 
     def quick_pool_add(self, room_id: str) -> None:
         self._quick_pool.add(room_id)

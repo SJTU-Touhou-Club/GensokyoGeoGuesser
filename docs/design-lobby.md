@@ -117,12 +117,13 @@ Join 点击后立即 `disabled`，防止双击（对齐 ref `lobby.html` 防双�
 | `ROOM_FULL` | 房间已满 |
 | `INVALID_PLAYER_ID` | 玩家 ID 无效 |
 | `NOT_HOST` | 仅房主可以开始游戏 |
-| `ALREADY_IN_ROOM` | 你已在房间中（提示重连或先离开） |
+| `CONNECTION_REPLACED` | 当前等待室已在另一个连接中打开 |
 
 ### 2.6 页面生命周期
 
-- `pagehide`：`sendBeacon` 调用 `POST /api/lobby/leave`（body 含 `connection_id`）
-- 定时 `POST /api/lobby/heartbeat`（间隔 `config.lobby.heartbeat_seconds`，默认 5s）
+- `pagehide`：关闭 SSE 和心跳，保留等待席位至 60 秒租约超时；主动 Cancel 才调用 leave。
+- 定时 `POST /api/lobby/heartbeat`，当前间隔为 2 秒。恢复页面后立即校准。
+- 连接被替换或租约超时后停止匹配、恢复 Join；不自动抢回席位。
 
 ---
 
@@ -135,7 +136,7 @@ Join 点击后立即 `disabled`，防止双击（对齐 ref `lobby.html` 防双�
 | `WAITING` | 接受玩家加入 |
 | `COUNTDOWN` | 已达 min，倒计时中 |
 | `STARTING` | 正在 `init_room`，即将广播跳转 |
-| `IN_GAME` | 对局进行中；lobby 仅处理观战者与重连 |
+| `IN_GAME` | 对局进行中；拒绝 lobby Join，已有局内页面通过游戏 API 重连 |
 
 ### 3.2 状态图
 
@@ -168,16 +169,17 @@ stateDiagram-v2
 
 `POST /api/lobby/join` 且 `room_id` 为空时：
 
-1. 读取 `lobby:quick_pool` 中状态为 `WAITING` 且未满的 room_id
-2. 若存在可合并房间 → 加入该 room
-3. 否则创建 `room_{uuid}`，写入 pool，首入者为 `host_id`
-4. **不按 N 分池**（neo-design §5.2）
+1. 串行执行快速匹配的选择和加入；逐房间检查租约，先清除过期席位。
+2. 优先返回同 `player_id` 已在等待的快速房间（`WAITING` / `COUNTDOWN`），用新连接替换旧连接。
+3. 否则选择 min/max 相符且未满的等待房间；若无则创建 `room_{uuid}`，首入者为房主。
+4. 已开始的房间不参与 Quick Join；玩家可以使用相同 ID 在其他房间继续匹配。
 
 ### 3.5 私房逻辑
 
 - `room_id` 为客户端提供的任意字符串（建议 trim，空则走快速匹配）
 - 首名 Join 的玩家为房主，可设置 min/max（写入房间状态）
-- 已在 `IN_GAME` 的房间：拒绝新 Join；允许同 `player_id` 重连；允许 Observe
+- `WAITING` / `COUNTDOWN`：同 ID 的 Join 替换此前连接，保留席位、房主、配置和倒计时。
+- 已在 `IN_GAME` 的房间：拒绝所有 lobby Join（包括相同 ID）；允许 Observe，已有局内页面独立重连。
 
 ---
 
@@ -193,18 +195,20 @@ stateDiagram-v2
 
 ### 4.2 规则
 
-1. 同一 `player_id` 的多个 `connection_id` **共享一个席位**
-2. 任一 connection 在线即 `connected=true`
-3. **仅当**该 `player_id` 的所有 connection 均 leave/heartbeat 超时 → 从 `players` 移除
-4. 重连：同 `room_id` + `player_id` + 新 `connection_id` → 追加 connection，恢复 `connected=true`
-5. `IN_GAME` 重连：席位保留；局内 `connected` 同步由 [design-game-network.md](design-game-network.md) 的 `/api/exit` 与 heartbeat 处理
+1. `player_id` 只在房间内唯一；同 ID 可以同时加入多个不同房间，无全局占用锁。
+2. 等待室中同 ID 的新 Join 替换旧 connection；旧 heartbeat 不得恢复旧连接，旧 leave 不得删除新连接。
+3. 旧 SSE 收到 `connection_replaced` 后关闭；客户端恢复 Join 按钮，不自动重入。
+4. 同 connection 重试 Join 保持幂等，不新增席位或重设已有配置。
+5. `IN_GAME` 不接受 lobby Join；游戏页面通过游戏 API 恢复连接。原有有效的大厅 heartbeat 仍可恢复漏掉的开局通知。
 
 ### 4.3 Heartbeat 与陈旧清理
 
-- 客户端每 `heartbeat_seconds` 上报
-- 服务端：若某 `connection_id` 超过 `3 × heartbeat_seconds` 未心跳 → 视为断开，从该玩家的 connection 列表移除
-- 若玩家所有 connection 均被移除 → 触发「玩家离开」逻辑
-- **推送** `lobby_update` / `player_left`（替代 ref 15s 静默剔除）
+- 前台客户端每 2 秒上报心跳；等待租约为 `lobby.reconnect_grace_seconds`，当前为 60 秒。
+- 服务端每秒 tick 检查过期；Join、heartbeat、配置更新和 Start 也先检查过期，再刷新租约或开局。
+- 租约达到 60 秒即删除席位，保存新 revision，并广播更新；房主过期则转给剩余最早加入者。
+- 人数不足 min 时取消倒计时，恢复 `WAITING`；先清理再检查倒计时，避免过期席位触发开局。
+- 超时客户端收到 `membership_expired` / `present=false` 后停止匹配，用户可再次点击 Join。
+- 活跃游戏的席位由游戏模块管理，不用等待室超时规则删除。
 
 ---
 
@@ -228,7 +232,6 @@ stateDiagram-v2
 | Key | 类型 | 内容 |
 |-----|------|------|
 | `lobby:room:{room_id}` | String (JSON) | 房间快照（见下） |
-| `lobby:player:{player_id}` | Hash | `room_id`, `role` (`player`/`spectator`) |
 | `lobby:quick_pool` | Set | 可快速匹配合并的 `room_id` 列表 |
 | `lobby:lock:{room_id}` | String | 分布式锁，TTL 5s（分片锁/actor 粒度） |
 
@@ -262,8 +265,7 @@ interface LobbyStore {
   get_room(room_id) -> Room | null
   save_room(room) -> void
   delete_room(room_id) -> void
-  get_player_room(player_id) -> room_id | null
-  set_player_room(player_id, room_id, role) -> void
+  acquire_matchmaking_lock() -> context manager
   quick_pool_add(room_id) / quick_pool_list() / quick_pool_remove(room_id)
 }
 ```
@@ -284,7 +286,7 @@ interface LobbyStore {
 ### 7.1 端点
 
 ```
-GET /events/lobby/{room_id}?player_id={player_id}
+GET /events/lobby/{room_id}?player_id={player_id}&connection_id={connection_id}
 ```
 
 - `Content-Type: text/event-stream`
@@ -355,7 +357,7 @@ GET /events/lobby/{room_id}?player_id={player_id}
 
 ### 8.4 `POST /api/lobby/start`
 
-**请求：** `{ "room_id", "player_id" }`（须为 host）  
+**请求：** `{ "room_id", "player_id", "connection_id" }`（须为当前连接的 host）
 **响应：** `{ "ok": true, "status": "STARTING" }`  
 **错误：** `403` `NOT_HOST`
 
@@ -367,7 +369,7 @@ GET /events/lobby/{room_id}?player_id={player_id}
 ### 8.6 `POST /api/lobby/heartbeat`
 
 **请求：** `{ "room_id", "player_id", "connection_id" }`  
-**响应：** `{ "ok": true }`
+**响应：** `{ "ok": true, "present": true, "room": {...} }`；被替换返回 `present=false, replaced=true`，已超时返回 `present=false`。心跳不能加入新 connection。
 
 ### 8.7 错误码枚举
 
@@ -378,7 +380,7 @@ GET /events/lobby/{room_id}?player_id={player_id}
 | `ROOM_FULL` | 409 | 已达 max |
 | `ROOM_IN_GAME` | 409 | 无法 join，可 observe |
 | `NOT_HOST` | 403 | 非房主调用 start |
-| `ALREADY_IN_ROOM` | 409 | 玩家已在其他房间 |
+| `CONNECTION_REPLACED` | 409 | 旧连接不能修改或开始等待室 |
 
 ---
 

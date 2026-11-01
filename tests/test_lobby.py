@@ -14,7 +14,6 @@ def reset_store():
     db.rooms.clear()
     store = get_lobby_store()
     store._rooms.clear()
-    store._player_index.clear()
     store._quick_pool.clear()
     yield
     db.rooms.clear()
@@ -260,13 +259,13 @@ def test_solo_rooms_are_separate_from_each_other_and_multiplayer():
         assert exc.value.code == "ROOM_FULL"
 
 
-def test_expired_lobby_membership_clears_index_and_allows_rejoin(monkeypatch):
+def test_expired_lobby_membership_allows_rejoin(monkeypatch):
     result = lobby_service.join(None, "alice", "c1")
     room = get_lobby_store().get_room(result["room_id"])
     now = room.players[0].last_heartbeat
     monkeypatch.setattr(lobby_service.time, "time", lambda: now + 61)
     lobby_service._prune_stale_connections(room, 60)
-    assert get_lobby_store().get_player_room("alice") is None
+    assert not room.players
     assert lobby_service.join(None, "alice", "c2")["is_host"] is True
 
 
@@ -303,3 +302,173 @@ def test_lobby_snapshots_have_monotonic_revisions():
     second = lobby_service.update_room_settings("revision", "alice", 2, 4, rounds=3)
     heartbeat = lobby_service.heartbeat("revision", "alice", "c1")
     assert first["room"]["revision"] < second["room"]["revision"] < heartbeat["room"]["revision"]
+
+
+def test_same_identity_can_join_multiple_rooms_and_observe_independently():
+    lobby_service.join("first", "alice", "first-tab")
+    lobby_service.join("second", "alice", "second-tab")
+    lobby_service.join("watch", "bob", "host")
+    lobby_service.observe("watch", "alice", "watch-tab")
+    lobby_service.leave("first", "alice", "first-tab")
+    store = get_lobby_store()
+    store.delete_room("watch")
+    assert lobby_service.heartbeat("second", "alice", "second-tab")["present"]
+    assert store.get_room("second").host_id == "alice"
+
+
+@pytest.mark.parametrize("quick", [False, True])
+def test_rejoin_replaces_connection_preserving_seat_and_settings(quick):
+    result = lobby_service.join(None if quick else "replace", "alice", "old", rounds=4)
+    room = get_lobby_store().get_room(result["room_id"])
+    player = room.players[0]
+    lobby_service.join(room.room_id, "bob", "other")
+    deadline = room.countdown_deadline
+    joined = player.joined_at
+    new = lobby_service.join(None if quick else room.room_id, "alice", "new")
+    assert new["room_id"] == room.room_id
+    assert room.host_id == "alice"
+    assert room.rounds == 4
+    assert room.countdown_deadline == deadline
+    assert room.players[0] is player and player.joined_at == joined
+    assert player.connection_ids == {"new"}
+    assert set(player.connection_seen) == {"new"}
+    old = lobby_service.heartbeat(room.room_id, "alice", "old")
+    assert old["replaced"] and not old["present"]
+    lobby_service.leave(room.room_id, "alice", "old")
+    assert lobby_service.heartbeat(room.room_id, "alice", "new")["present"]
+
+
+def test_quick_rejoin_prioritizes_own_waiting_room():
+    first = lobby_service.join(None, "alice", "old", min_players=3, max_players=5)
+    lobby_service.join(None, "bob", "other", min_players=2, max_players=4)
+    again = lobby_service.join(None, "alice", "new", min_players=2, max_players=4)
+    assert again["room_id"] == first["room_id"]
+    assert again["room"]["min_players"] == 3
+
+
+@pytest.mark.parametrize("connection", ["old", "new"])
+def test_started_room_rejects_all_lobby_rejoins(connection):
+    lobby_service.join("started", "alice", "old")
+    lobby_service.start("started", "alice")
+    with pytest.raises(LobbyError) as exc:
+        lobby_service.join("started", "alice", connection)
+    assert exc.value.code == "ROOM_IN_GAME"
+    assert get_lobby_store().get_room("started").players[0].connection_ids == {"old"}
+    assert lobby_service.heartbeat("started", "alice", "old")["present"]
+
+
+def test_quick_join_after_game_start_enters_another_room():
+    first = lobby_service.join(None, "alice", "old")
+    lobby_service.start(first["room_id"], "alice")
+    second = lobby_service.join(None, "alice", "new")
+    assert first["room_id"] != second["room_id"]
+
+
+def test_replaced_tab_cannot_start_or_configure_room():
+    lobby_service.join("replace", "alice", "old")
+    lobby_service.join("replace", "alice", "new")
+    for action in (
+        lambda: lobby_service.start("replace", "alice", "old"),
+        lambda: lobby_service.update_room_settings("replace", "alice", 2, 4, connection_id="old"),
+    ):
+        with pytest.raises(LobbyError) as exc:
+            action()
+        assert exc.value.code == "CONNECTION_REPLACED"
+    assert lobby_service.start("replace", "alice", "new")["ok"]
+
+
+def test_timeout_prunes_before_late_heartbeat_and_bumps_revision(monkeypatch):
+    lobby_service.join("expire", "alice", "c1")
+    room = get_lobby_store().get_room("expire")
+    now = room.players[0].last_heartbeat
+    revision = room.revision
+    monkeypatch.setattr(lobby_service.time, "time", lambda: now + 60)
+    result = lobby_service.heartbeat("expire", "alice", "c1")
+    assert not result["present"]
+    assert room.players == [] and room.host_id == ""
+    assert room.revision > revision
+
+
+def test_matching_tick_expires_host_cancels_countdown_and_can_restart(monkeypatch):
+    now = lobby_service.time.time()
+    monkeypatch.setattr(lobby_service.time, "time", lambda: now)
+    lobby_service.join("countdown", "alice", "old-host")
+    monkeypatch.setattr(lobby_service.time, "time", lambda: now + 40)
+    lobby_service.join("countdown", "bob", "guest")
+    room = get_lobby_store().get_room("countdown")
+    assert room.status == LobbyStatus.COUNTDOWN
+    monkeypatch.setattr(lobby_service.time, "time", lambda: now + 60)
+    lobby_service.tick_all_rooms()
+    assert room.host_id == "bob"
+    assert room.status == LobbyStatus.WAITING and room.countdown_deadline is None
+    assert "countdown" not in db.rooms
+    lobby_service.join("countdown", "carol", "new-guest")
+    assert room.status == LobbyStatus.COUNTDOWN
+    monkeypatch.setattr(lobby_service.time, "time", lambda: now + 75)
+    lobby_service.heartbeat("countdown", "bob", "guest")
+    monkeypatch.setattr(lobby_service.time, "time", lambda: now + 90)
+    lobby_service.tick_all_rooms()
+    assert db.get_room("countdown").player_ids == ["bob", "carol"]
+
+
+def test_expired_guest_never_starts_when_countdown_deadline_also_passed(monkeypatch):
+    lobby_service.join("stale", "alice", "c1")
+    lobby_service.join("stale", "bob", "c2")
+    room = get_lobby_store().get_room("stale")
+    now = max(p.last_heartbeat for p in room.players)
+    monkeypatch.setattr(lobby_service.time, "time", lambda: now + 61)
+    lobby_service.tick_all_rooms()
+    assert room.status == LobbyStatus.WAITING
+    assert not room.players and "stale" not in db.rooms
+
+
+def test_stale_players_do_not_fill_a_quick_match_before_tick(monkeypatch):
+    result = lobby_service.join(None, "alice", "old", min_players=2, max_players=2)
+    room = get_lobby_store().get_room(result["room_id"])
+    now = room.players[0].last_heartbeat
+    monkeypatch.setattr(lobby_service.time, "time", lambda: now + 61)
+    new = lobby_service.join(None, "bob", "new", min_players=2, max_players=2)
+    assert new["room_id"] == room.room_id
+    assert room.status == LobbyStatus.WAITING
+    assert [p.player_id for p in room.players] == ["bob"]
+
+
+def test_concurrent_quick_rejoins_keep_one_seat_and_one_connection():
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        results = list(pool.map(lambda n: lobby_service.join(None, "alice", f"c{n}"), range(12)))
+    assert len({r["room_id"] for r in results}) == 1
+    room = get_lobby_store().get_room(results[0]["room_id"])
+    assert len(room.players) == len(room.players[0].connection_ids) == 1
+
+
+@pytest.mark.parametrize("late_subscribe", [False, True])
+def test_replaced_stream_closes_before_match_start(late_subscribe):
+    from neo.lobby import sse
+    sse.set_broadcast_hook()
+    lobby_service.join("streams", "alice", "old")
+    q = sse.subscribe("streams")
+    stream = sse.event_stream("streams", q, "alice", "old")
+    if not late_subscribe:
+        assert "lobby_snapshot" in next(stream)
+    lobby_service.join("streams", "alice", "new")
+    lobby_service.start("streams", "alice", "new")
+    assert "connection_replaced" in next(stream)
+    with pytest.raises(StopIteration):
+        next(stream)
+    assert "streams" not in sse._event_queues
+
+
+def test_expired_stream_does_not_receive_a_later_match_start(monkeypatch):
+    from neo.lobby import sse
+    sse.set_broadcast_hook()
+    lobby_service.join("expired-stream", "alice", "old")
+    room = get_lobby_store().get_room("expired-stream")
+    q = sse.subscribe(room.room_id)
+    stream = sse.event_stream(room.room_id, q, "alice", "old")
+    assert "lobby_snapshot" in next(stream)
+    now = room.players[0].last_heartbeat
+    monkeypatch.setattr(lobby_service.time, "time", lambda: now + 61)
+    lobby_service.tick_all_rooms()
+    assert "membership_expired" in next(stream)
+    stream.close()

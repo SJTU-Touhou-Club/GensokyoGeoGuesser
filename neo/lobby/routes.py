@@ -63,7 +63,9 @@ def start():
     data = request.get_json(silent=True) or {}
     try:
         return jsonify(
-            lobby_service.start(data.get("room_id", ""), data.get("player_id", ""))
+            lobby_service.start(
+                data.get("room_id", ""), data.get("player_id", ""), data.get("connection_id"),
+            )
         )
     except LobbyError as e:
         return _err(e)
@@ -82,6 +84,7 @@ def update_settings():
                 rounds=data.get("rounds"),
                 difficulty=data.get("difficulty"),
                 scoring_strategy=data.get("scoring_strategy"),
+                connection_id=data.get("connection_id"),
             )
         )
     except LobbyError as e:
@@ -115,7 +118,9 @@ def heartbeat():
 def events(room_id: str):
     q = lobby_sse.subscribe(room_id)
     response = Response(
-        lobby_sse.event_stream(room_id, q),
+        lobby_sse.event_stream(
+            room_id, q, request.args.get("player_id"), request.args.get("connection_id"),
+        ),
         mimetype="text/event-stream",
     )
     response.headers["Cache-Control"] = "no-cache, no-store"

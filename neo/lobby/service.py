@@ -1,10 +1,9 @@
 from __future__ import annotations
 
-import json
-import queue
-import threading
+import logging
 import time
-from typing import Callable, Dict, List, Optional
+from contextlib import nullcontext
+from typing import Callable, Optional
 
 from neo.config import (
     default_scoring_mode,
@@ -204,90 +203,69 @@ def join(
         scoring_strategy if scoring_strategy is not None else None
     )
 
-    existing = store.get_player_room(player_id)
-    if existing:
-        previous = store.get_room(existing)
-        if previous:
-            with store.acquire_lock(existing):
-                _prune_stale_connections(previous, _lobby_cfg().get("reconnect_grace_seconds", 60))
-        existing = store.get_player_room(player_id)
-    if existing and not room_id:
-        previous = store.get_room(existing)
-        member = _find_player(previous, player_id) if previous else None
-        if member and connection_id in member.connection_ids:
-            room_id = existing
-    if existing and existing != room_id:
-        raise LobbyError("ALREADY_IN_ROOM", 409)
-
-    if not room_id:
-        room_id, is_quick = _find_or_create_quick_room(store, min_p, max_p)
-    else:
-        room_id = room_id.strip()
-        is_quick = False
-
-    with store.acquire_lock(room_id):
-        room = store.get_room(room_id)
-        if room is None:
-            room = LobbyRoom(
-                room_id=room_id,
-                host_id=player_id,
-                min_players=min_p,
-                max_players=max_p,
-                rounds=room_rounds,
-                difficulty=room_difficulty,
-                scoring_strategy=room_strategy,
-            )
-            store.save_room(room)
+    room_id = (room_id or "").strip()
+    is_quick = not room_id
+    # Serialize only quick-room selection/admission, never a player's identity.
+    with store.acquire_matchmaking_lock() if is_quick else nullcontext():
+        while True:
             if is_quick:
-                store.quick_pool_add(room_id)
+                room_id = _find_or_create_quick_room(store, min_p, max_p, player_id)
+            with store.acquire_lock(room_id):
+                room = store.get_room(room_id)
+                if room is None:
+                    room = LobbyRoom(
+                        room_id=room_id, host_id=player_id,
+                        min_players=min_p, max_players=max_p,
+                        rounds=room_rounds, difficulty=room_difficulty,
+                        scoring_strategy=room_strategy,
+                    )
+                    store.save_room(room)
+                    if is_quick:
+                        store.quick_pool_add(room_id)
 
-        if room.status == LobbyStatus.IN_GAME:
-            player = _find_player(room, player_id)
-            if player:
-                return _reconnect_player(store, room, player, connection_id, player_id)
-            raise LobbyError("ROOM_IN_GAME", 409)
+                if room.status not in (LobbyStatus.WAITING, LobbyStatus.COUNTDOWN):
+                    if is_quick:
+                        store.quick_pool_remove(room_id)
+                        continue
+                    raise LobbyError("ROOM_IN_GAME", 409)
 
-        if len(room.players) >= room.max_players:
-            existing_p = _find_player(room, player_id)
-            if existing_p:
-                return _reconnect_player(store, room, existing_p, connection_id, player_id)
-            raise LobbyError("ROOM_FULL", 409)
-
-        player = _find_player(room, player_id)
-        if player is None:
-            player = LobbyPlayer(player_id=player_id)
-            room.players.append(player)
-            _emit(room_id, "player_joined", {"player_id": player_id})
-        player.connection_ids.add(connection_id)
-        player.connected = True
-        player.last_heartbeat = time.time()
-        player.connection_seen[connection_id] = player.last_heartbeat
-        store.set_player_room(player_id, room_id, "player")
-        _ensure_living_host(room)
-        store.save_room(room)
-
-        _evaluate_waiting(room)
-        store.save_room(room)
-        _emit(room_id, "lobby_update", _room_update_payload(room))
-        return _build_join_response(room, player_id, player_id == room.host_id)
+                _prune_stale_connections(room, _lobby_cfg().get("reconnect_grace_seconds", 60))
+                player = _find_player(room, player_id)
+                if player is None:
+                    if len(room.players) >= room.max_players:
+                        if is_quick:
+                            continue
+                        raise LobbyError("ROOM_FULL", 409)
+                    player = LobbyPlayer(player_id=player_id)
+                    room.players.append(player)
+                    _emit(room_id, "player_joined", {"player_id": player_id})
+                _replace_player_connection(room, player, connection_id)
+                _ensure_living_host(room)
+                _evaluate_waiting(room)
+                store.save_room(room)
+                _emit(room_id, "lobby_update", _room_update_payload(room))
+                return _build_join_response(room, player_id, player_id == room.host_id)
 
 
-def _find_or_create_quick_room(store, min_p: int, max_p: int) -> tuple[str, bool]:
-    for rid in store.quick_pool_list():
+def _find_or_create_quick_room(store, min_p: int, max_p: int, player_id: str) -> str:
+    available = []
+    for rid in sorted(store.quick_pool_list()):
         with store.acquire_lock(rid):
             room = store.get_room(rid)
-            if (
-                room
-                and room.status in (LobbyStatus.WAITING, LobbyStatus.COUNTDOWN)
-                and room.min_players == min_p
-                and room.max_players == max_p
-                and len(room.players) < room.max_players
-            ):
-                return rid, True
+            if not room or room.status not in (LobbyStatus.WAITING, LobbyStatus.COUNTDOWN):
+                continue
+            _prune_stale_connections(room, _lobby_cfg().get("reconnect_grace_seconds", 60))
+            # Rejoin the same waiting quick match before considering other rooms.
+            if _find_player(room, player_id):
+                return rid
+            if (room.min_players == min_p and room.max_players == max_p
+                    and len(room.players) < room.max_players):
+                available.append(rid)
+    if available:
+        return available[0]
     import uuid
 
-    new_id = f"room_{uuid.uuid4().hex[:12]}"
-    return new_id, True
+    return f"room_{uuid.uuid4().hex[:12]}"
 
 
 def _find_player(room: LobbyRoom, player_id: str) -> Optional[LobbyPlayer]:
@@ -297,14 +275,23 @@ def _find_player(room: LobbyRoom, player_id: str) -> Optional[LobbyPlayer]:
     return None
 
 
-def _reconnect_player(store, room: LobbyRoom, player: LobbyPlayer, connection_id: str, player_id: str) -> dict:
-    player.connection_ids.add(connection_id)
+def _replace_player_connection(room: LobbyRoom, player: LobbyPlayer, connection_id: str) -> None:
+    replaced = bool(player.connection_ids - {connection_id})
+    player.connection_ids = {connection_id}
     player.connected = True
     player.last_heartbeat = time.time()
-    player.connection_seen[connection_id] = player.last_heartbeat
-    store.set_player_room(player_id, room.room_id, "player")
-    store.save_room(room)
-    return _build_join_response(room, player_id, player_id == room.host_id)
+    player.connection_seen = {connection_id: player.last_heartbeat}
+    if replaced:
+        _emit(room.room_id, "connection_replaced", {
+            "player_id": player.player_id, "connection_id": connection_id, "role": "player",
+        })
+
+
+def _check_player_connection(room: LobbyRoom, player_id: str, connection_id: Optional[str]) -> None:
+    if connection_id is not None:
+        player = _find_player(room, player_id)
+        if player is None or connection_id not in player.connection_ids:
+            raise LobbyError("CONNECTION_REPLACED", 409)
 
 
 def observe(room_id: str, player_id: str, connection_id: str) -> dict:
@@ -334,7 +321,6 @@ def observe(room_id: str, player_id: str, connection_id: str) -> dict:
         spec.connection_ids.add(connection_id)
         spec.last_heartbeat = time.time()
         spec.connection_seen[connection_id] = spec.last_heartbeat
-        store.set_player_room(player_id, room_id, "spectator")
         store.save_room(room)
         _emit(room_id, "lobby_update", _room_update_payload(room))
         return _build_join_response(room, player_id, False, role="spectator")
@@ -353,7 +339,6 @@ def leave(room_id: str, player_id: str, connection_id: str) -> dict:
                 p.connection_seen.pop(connection_id, None)
                 if not p.connection_ids:
                     room.players.remove(p)
-                    store.set_player_room(player_id, None, "player")
                     removed = True
                     _emit(room_id, "player_left", {"player_id": player_id})
         for s in list(room.spectators):
@@ -362,7 +347,6 @@ def leave(room_id: str, player_id: str, connection_id: str) -> dict:
                 s.connection_seen.pop(connection_id, None)
                 if not s.connection_ids:
                     room.spectators.remove(s)
-                    store.set_player_room(player_id, None, "spectator")
         if removed:
             _ensure_living_host(room)
             if room.status == LobbyStatus.COUNTDOWN:
@@ -375,14 +359,16 @@ def leave(room_id: str, player_id: str, connection_id: str) -> dict:
         return {"ok": True}
 
 
-def start(room_id: str, player_id: str) -> dict:
+def start(room_id: str, player_id: str, connection_id: Optional[str] = None) -> dict:
     store = get_lobby_store()
     with store.acquire_lock(room_id):
         room = store.get_room(room_id)
         if room is None:
             raise LobbyError("ROOM_NOT_FOUND", 404)
+        _prune_stale_connections(room, _lobby_cfg().get("reconnect_grace_seconds", 60))
         if room.host_id != player_id:
             raise LobbyError("NOT_HOST", 403)
+        _check_player_connection(room, player_id, connection_id)
         if room.status == LobbyStatus.IN_GAME:
             return {"ok": True, "status": "IN_GAME", "room_id": room.room_id,
                     "game_url": f"/index.html?room={room.room_id}&player_id={player_id}"}
@@ -405,14 +391,17 @@ def update_room_settings(
     rounds=None,
     difficulty=None,
     scoring_strategy=None,
+    connection_id: Optional[str] = None,
 ) -> dict:
     store = get_lobby_store()
     with store.acquire_lock(room_id):
         room = store.get_room(room_id)
         if room is None:
             raise LobbyError("ROOM_NOT_FOUND", 404)
+        _prune_stale_connections(room, _lobby_cfg().get("reconnect_grace_seconds", 60))
         if room.host_id != player_id:
             raise LobbyError("NOT_HOST", 403)
+        _check_player_connection(room, player_id, connection_id)
         if room.status not in (LobbyStatus.WAITING, LobbyStatus.COUNTDOWN):
             raise LobbyError("ROOM_IN_GAME", 409)
         n = len(room.players)
@@ -451,25 +440,23 @@ def heartbeat(room_id: str, player_id: str, connection_id: str) -> dict:
         room = store.get_room(room_id)
         if room is None:
             return {"ok": True, "present": False}
-        now = time.time()
-        for p in room.players:
-            if p.player_id == player_id:
-                p.connection_ids.add(connection_id)
-                p.last_heartbeat = now
-                p.connection_seen[connection_id] = now
-        for s in room.spectators:
-            if s.player_id == player_id:
-                s.connection_ids.add(connection_id)
-                s.last_heartbeat = now
-                s.connection_seen[connection_id] = now
         _prune_stale_connections(room, timeout)
+        now = time.time()
+        members = [m for m in room.players + room.spectators if m.player_id == player_id]
+        present = any(connection_id in m.connection_ids for m in members)
+        if members and not present:
+            return {"ok": True, "present": False, "replaced": True}
+        for member in members:
+            if connection_id in member.connection_ids:
+                member.last_heartbeat = now
+                member.connection_seen[connection_id] = now
         _evaluate_countdown(room)
         store.save_room(room)
         return {
             "ok": True,
             "status": room.status.value,
             "room": room.to_dict(),
-            "present": any(m.player_id == player_id for m in room.players + room.spectators),
+            "present": present,
             "countdown_deadline": room.countdown_deadline,
             "countdown_remaining_seconds": room.countdown_remaining_seconds(),
         }
@@ -488,18 +475,18 @@ def room_status(room_id: str) -> dict:
 
 
 def _prune_stale_connections(room: LobbyRoom, timeout: float) -> None:
+    if room.status not in (LobbyStatus.WAITING, LobbyStatus.COUNTDOWN):
+        return
     now = time.time()
     removed = False
     for members in (room.players, room.spectators):
         for member in list(members):
             for cid in list(member.connection_ids):
-                if now - member.connection_seen.get(cid, member.last_heartbeat) > timeout:
+                if now - member.connection_seen.get(cid, member.last_heartbeat) >= timeout:
                     member.connection_ids.discard(cid)
                     member.connection_seen.pop(cid, None)
             if not member.connection_ids:
                 members.remove(member)
-                if get_lobby_store().get_player_room(member.player_id) == room.room_id:
-                    get_lobby_store().set_player_room(member.player_id, None, "player")
                 removed = True
                 _emit(room.room_id, "player_left", {"player_id": member.player_id})
     host_changed = _ensure_living_host(room) if removed else False
@@ -507,6 +494,7 @@ def _prune_stale_connections(room: LobbyRoom, timeout: float) -> None:
         room.status = LobbyStatus.WAITING
         room.countdown_deadline = None
     if removed or host_changed:
+        get_lobby_store().save_room(room)
         _emit(room.room_id, "lobby_update", _room_update_payload(room))
 
 
@@ -598,4 +586,4 @@ def tick_all_rooms() -> None:
                         store.save_room(room)
                         _emit(room_id, "lobby_update", _room_update_payload(room))
         except Exception:
-            pass
+            logging.getLogger(__name__).exception("Lobby tick failed for %s", room_id)

@@ -88,6 +88,15 @@ connection interruption or browser resume. Presence leases allow a 60-second
 reconnect grace period. Game actions use acknowledgements, duplicate protection,
 and round/sequence checks; Submit waits for the latest guess to be acknowledged.
 
+Player IDs are scoped to each room, so the same ID can participate in multiple
+rooms. Joining a waiting room again replaces its previous connection while keeping
+the seat and settings. Quick Join first recovers that ID's waiting quick match;
+started rooms reject lobby Join. Existing game pages reconnect through the game API.
+Matching leases expire after 60 seconds without a heartbeat, checked by the server
+every second and before admission or start. Expiry removes the seat, transfers the
+host, and cancels an underfilled countdown. An expired or replaced lobby tab stops
+matching; joining again is an explicit action.
+
 These settings target less than five seconds of stale state for a foreground
 client that can reach the server. They cannot bound latency while a browser is
 suspended or offline. Large source maps are retained at their intended resolution;
