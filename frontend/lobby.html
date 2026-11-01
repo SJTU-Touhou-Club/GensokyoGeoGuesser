@@ -87,6 +87,19 @@
       .btn.compact:hover {
         background: #e8ebef;
       }
+      .btn.solo-icon {
+        box-sizing: border-box;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 40px;
+        height: 40px;
+        padding: 9px;
+      }
+      .solo-icon svg {
+        width: 18px;
+        height: 18px;
+      }
       #status-bar {
         display: none;
         margin-top: 12px;
@@ -164,15 +177,18 @@
         <div class="row actions">
           <button id="btn-refmap" class="btn compact" type="button">Ref Map</button>
           <div class="actions-right">
-            <button id="btn-solo" class="btn" type="button">Play Solo</button>
+            <button id="btn-solo" class="btn compact solo-icon" type="button" aria-label="Play Solo" title="Play Solo">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                <circle cx="12" cy="7" r="4" />
+                <path d="M4 22v-3a8 8 0 0 1 16 0v3" />
+              </svg>
+            </button>
             <button id="btn-join" class="btn primary" type="button">Join</button>
             <button id="btn-observe" class="btn" type="button">Observe</button>
             <button id="btn-cancel" class="btn" type="button" style="display: none">Cancel</button>
           </div>
         </div>
       </div>
-
-      <p style="font-size: 13px; color: #555">Choose Play Solo or Join, configure the game, then start. On the map, scroll to zoom or drag to pan; trackpads and touchscreens support pinch zoom.</p>
 
       <div id="waiting-room">
         <div>Room: <strong id="wr-room"></strong></div>

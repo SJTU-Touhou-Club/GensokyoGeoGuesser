@@ -1,4 +1,4 @@
-import { prefetchImages } from "./connection.js";
+import { prefetchImages, loadCachedMap } from "./connection.js";
 import { createSyncScheduler } from "./sync.js";
 import { createMapController } from "./map.js";
 import { renderLeaderboard } from "./leaderboard.js";
@@ -71,7 +71,7 @@ if (observe) {
 const refOverlay = document.getElementById("ref-overlay");
 document.getElementById("refmap-btn")?.addEventListener("click", () => {
   const image = refOverlay.querySelector("img");
-  if (!image.src) image.src = image.dataset.src;
+  if (!image.getAttribute("src")) loadCachedMap(image, image.dataset.src);
   refOverlay.classList.add("open");
 });
 refOverlay?.addEventListener("click", () => refOverlay.classList.remove("open"));
@@ -173,7 +173,8 @@ scheduler.onStatus(message => {
 scheduler.onState(updateUI);
 scheduler.onLog((msg) => debugPanel.log(msg));
 
-scheduler.connect(room, playerId).catch(() => {
+// Establish synchronization before the large map competes for bandwidth.
+scheduler.connect(room, playerId).then(() => loadCachedMap(mapImage, mapImage.dataset.src)).catch(() => {
   alert("Room not found. Return to lobby.");
   window.location.href = "/lobby";
 });

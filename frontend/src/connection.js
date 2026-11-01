@@ -24,6 +24,60 @@ let prefetchRunning = false;
 const prefetchQueue = new Map();
 const prefetched = new Set();
 
+// Safari may discard large fetches from its HTTP cache. Keep only the two maps
+// in disk-backed Cache Storage, without decoding them during lobby prefetch.
+const MAP_CACHE = "ggg-maps-v2";
+const MAP_PATHS = new Set(["/media/map_v2.jpg", "/media/ref_map_v2.jpg"]);
+const mapLoads = new WeakMap();
+
+async function openMapCache(url) {
+  try {
+    const parsed = new URL(url, location.href);
+    if (parsed.origin === location.origin && MAP_PATHS.has(parsed.pathname) && "caches" in globalThis) {
+      return await caches.open(MAP_CACHE);
+    }
+  } catch { /* Cache Storage can be unavailable in private browsing. */ }
+  return null;
+}
+
+async function cachedMap(cache, url) {
+  if (!cache) return null;
+  try {
+    const response = await cache.match(url);
+    if (!response) return null;
+    const stored = Date.parse(response.headers.get("date"));
+    if (Number.isFinite(stored) && Date.now() - stored < 86400000) return response;
+    await cache.delete(url);
+  } catch { /* Fall back to the ordinary image request. */ }
+  return null;
+}
+
+export function loadCachedMap(image, url) {
+  if (mapLoads.has(image)) return mapLoads.get(image);
+  const loading = (async () => {
+    try {
+      const absolute = new URL(url, location.href).href;
+      const response = await cachedMap(await openMapCache(absolute), absolute);
+      if (response) {
+        const objectUrl = URL.createObjectURL(await response.blob());
+        const release = () => {
+          URL.revokeObjectURL(objectUrl);
+          image.removeEventListener("load", release);
+          image.removeEventListener("error", fallback);
+        };
+        const fallback = () => { release(); image.src = url; };
+        image.addEventListener("load", release, { once: true });
+        image.addEventListener("error", fallback, { once: true });
+        image.src = objectUrl;
+        return;
+      }
+    } catch { /* Cache failure must never prevent the map from loading. */ }
+    image.src = url;
+  })();
+  mapLoads.set(image, loading);
+  return loading;
+}
+
 export async function requestJson(url, options = {}) {
   const { background, ...fetchOptions } = options;
   const controller = new AbortController();
@@ -68,15 +122,20 @@ export function prefetchImages(urls) {
       prefetchTask = new AbortController();
       let cancelled = false;
       try {
-        const response = await fetch(url, {
+        const cache = await openMapCache(url);
+        const cached = await cachedMap(cache, url);
+        prefetchTask.signal.throwIfAborted();
+        const response = cached || await fetch(url, {
           priority: "low", cache: "force-cache", signal: prefetchTask.signal,
         });
         if (!response.ok) throw new Error("Prefetch failed");
-        // Drain into the HTTP cache without retaining or decoding a full-size image.
-        if (response.body) {
+        // Cache Storage consumes the stream directly; no clone or decoded Image.
+        if (!cached && cache) {
+          await cache.put(url, response);
+        } else if (!cached && response.body) {
           const reader = response.body.getReader();
           while (!(await reader.read()).done) { /* discard chunks */ }
-        } else {
+        } else if (!cached) {
           await response.blob();
         }
         prefetched.add(url);

@@ -91,7 +91,10 @@ and round/sequence checks; Submit waits for the latest guess to be acknowledged.
 These settings target less than five seconds of stale state for a foreground
 client that can reach the server. They cannot bound latency while a browser is
 suspended or offline. Large source maps are retained at their intended resolution;
-prefetch is deferred, serialized, and interrupted for urgent actions.
+prefetch is deferred, serialized, and interrupted for urgent actions. Completed
+map prefetches use a one-day browser Cache Storage entry shared by the lobby and
+game; unavailable storage falls back to normal image loading. Game synchronization
+starts before the map download, and waiting-room configuration keeps prefetch active.
 
 ## Repository layout
 

@@ -17,6 +17,8 @@ export function createSyncScheduler() {
   let suspended = false;
   let generation = 0;
   let lastStream = 0;
+  let lastPoll = 0;
+  let lastContact = 0;
   let retryDelay = 250;
 
   const log = message => onLogCb?.(message);
@@ -25,6 +27,7 @@ export function createSyncScheduler() {
 
   function applyState(data) {
     if (destroyed || data?.state_version == null || data.state_version < localVersion) return;
+    lastContact = Date.now();
     latestState = data;
     localVersion = data.state_version;
     status("");
@@ -46,7 +49,8 @@ export function createSyncScheduler() {
       .catch(error => {
         if (currentGeneration === generation && !destroyed) {
           log(`State request: ${error.code || error.message}`);
-          status(error.status === 404 ? "Game no longer available." : "Reconnecting…");
+          if (error.status === 404) status("Game no longer available.");
+          else if (Date.now() - lastContact >= 3000) status("Reconnecting…");
         }
         return null;
       })
@@ -85,6 +89,7 @@ export function createSyncScheduler() {
     const alive = () => {
       if (source !== evtSource) return;
       lastStream = Date.now();
+      lastContact = lastStream;
       retryDelay = 250;
     };
     source.onopen = () => { alive(); scheduleFetch(); };
@@ -156,12 +161,19 @@ export function createSyncScheduler() {
       fetchAgain = false;
       latestGuess = null;
       clearInterval(pollTimer);
+      lastPoll = lastContact = Date.now();
       connectEvents();
       // This bounded safety reconciliation also renews the player's presence lease.
       pollTimer = setInterval(() => {
         if (suspended || destroyed) return;
+        const now = Date.now();
+        const delayed = now - lastPoll > 3000;
+        lastPoll = now;
         fetchState();
-        if (Date.now() - lastStream > 3000) reconnect();
+        // After image decoding stalls the event loop, let queued pings run first.
+        // A stream still connecting gets five seconds; polling keeps state fresh.
+        const streamBudget = evtSource?.readyState === 0 ? 5000 : 3000;
+        if (!delayed && now - lastStream > streamBudget) reconnect();
       }, 2000);
       return fetchState();
     },

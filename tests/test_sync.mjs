@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { randomUUID } from 'node:crypto';
 
+const fetchNative = globalThis.fetch;
 const windowEvents = new EventTarget();
 const documentEvents = new EventTarget();
 Object.assign(globalThis, {
@@ -192,6 +193,7 @@ test('urgent actions interrupt an active background prefetch', async t => {
   const stop = prefetchImages(['/background-map.jpg']);
   t.after(() => { stop(); delete window.requestIdleCallback; delete globalThis.requestIdleCallback; });
   const background = idle.shift()();
+  await wait(0);
   await requestJson('/api/submit', { method: 'POST' });
   await background;
   assert(prefetchSignal.aborted);
@@ -208,4 +210,125 @@ test('an unresponsive state request is aborted within the recovery budget', asyn
   const start = performance.now();
   await assert.rejects(requestJson('/api/state'), error => error.name === 'AbortError');
   assert(performance.now() - start < 3000);
+});
+
+test('map prefetch survives navigation through disk cache and image loading releases its blob URL', async t => {
+  const idle = [];
+  window.requestIdleCallback = true;
+  globalThis.requestIdleCallback = fn => idle.push(fn);
+  globalThis.location = new URL('https://example.test/lobby');
+  const entries = new Map();
+  globalThis.caches = { open: async () => ({
+    match: async key => entries.get(key)?.clone(),
+    put: async (key, value) => { entries.set(key, new Response(await value.blob(), { headers: value.headers })); },
+    delete: async key => entries.delete(key),
+  }) };
+  let transfers = 0;
+  globalThis.fetch = async () => {
+    transfers++;
+    return new Response('map bytes', { headers: { date: new Date().toUTCString() } });
+  };
+  const { prefetchImages } = await import('../frontend/src/connection.js');
+  const stop = prefetchImages(['/media/map_v2.jpg']);
+  t.after(() => { stop(); delete globalThis.caches; delete window.requestIdleCallback; delete globalThis.requestIdleCallback; });
+  while (idle.length) await idle.shift()();
+  assert.equal(transfers, 1);
+  assert.equal(entries.size, 1);
+  // A fresh module has no in-memory knowledge of the lobby's completed transfer.
+  const { loadCachedMap } = await import('../frontend/src/connection.js?game-page');
+  const image = new EventTarget();
+  await loadCachedMap(image, '/media/map_v2.jpg');
+  assert(image.src.startsWith('blob:'));
+  const objectUrl = image.src;
+  assert.equal(await (await fetchNative(objectUrl)).text(), 'map bytes');
+  assert.equal(transfers, 1);
+  image.dispatchEvent(new Event('load'));
+  await assert.rejects(fetchNative(objectUrl));
+});
+
+
+test('map cache expiry and private-browsing failures fall back to the image URL', async t => {
+  globalThis.location = new URL('https://example.test/lobby');
+  let removed = false;
+  globalThis.caches = { open: async () => ({
+    match: async () => new Response('old map', { headers: { date: new Date(Date.now() - 86400001).toUTCString() } }),
+    delete: async () => { removed = true; },
+  }) };
+  t.after(() => { delete globalThis.caches; });
+  const { loadCachedMap } = await import('../frontend/src/connection.js');
+  const image = new EventTarget();
+  await loadCachedMap(image, '/media/map_v2.jpg');
+  assert(removed);
+  assert.equal(image.src, '/media/map_v2.jpg');
+  globalThis.caches.open = async () => { throw new Error('Storage disabled'); };
+  const privateImage = new EventTarget();
+  await loadCachedMap(privateImage, '/media/ref_map_v2.jpg');
+  assert.equal(privateImage.src, '/media/ref_map_v2.jpg');
+});
+
+test('prefetch resumes after an urgent lobby action instead of discarding the map', async t => {
+  const idle = [];
+  window.requestIdleCallback = true;
+  globalThis.requestIdleCallback = fn => idle.push(fn);
+  globalThis.location = new URL('https://example.test/lobby');
+  let transfers = 0;
+  globalThis.fetch = (url, options) => {
+    if (options.method === 'POST') return Promise.resolve(response({ ok: true }));
+    transfers++;
+    if (transfers > 1) return Promise.resolve(new Response('finished map'));
+    return new Promise((resolve, reject) => options.signal.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError'))));
+  };
+  const { prefetchImages, requestJson } = await import('../frontend/src/connection.js');
+  const stop = prefetchImages(['/resume-map.jpg']);
+  t.after(() => { stop(); delete window.requestIdleCallback; delete globalThis.requestIdleCallback; });
+  const first = idle.shift()();
+  await wait(0);
+  await requestJson('/api/lobby/join', { method: 'POST' });
+  await first;
+  while (idle.length) await idle.shift()();
+  assert.equal(transfers, 2);
+});
+
+test('image-decoding pauses do not tear down a stream before queued pings can run', async t => {
+  let now = 10000;
+  const originalNow = Date.now;
+  Date.now = () => now;
+  t.after(() => { Date.now = originalNow; });
+  const sync = scheduler(t, async () => response(baseState()));
+  await sync.connect('room', 'alice');
+  const source = Source.instances[0];
+  source.readyState = 1;
+  now += 6000; // Main thread was unavailable for longer than the stream watchdog.
+  [...intervals.values()][0].fn();
+  assert(!source.closed);
+  source.listeners.ping();
+  now += 2000;
+  [...intervals.values()][0].fn();
+  assert(!source.closed);
+  now += 2000; // A genuinely silent stream is still replaced promptly.
+  [...intervals.values()][0].fn();
+  assert(source.closed);
+});
+
+test('a state timeout during live stream traffic does not show a false reconnect warning', async t => {
+  let now = 10000;
+  const originalNow = Date.now;
+  Date.now = () => now;
+  t.after(() => { Date.now = originalNow; });
+  let failing = false;
+  const messages = [];
+  const sync = scheduler(t, async () => {
+    if (failing) throw new DOMException('Timed out', 'AbortError');
+    return response(baseState());
+  });
+  sync.onStatus(message => messages.push(message));
+  await sync.connect('room', 'alice');
+  failing = true;
+  now += 2000;
+  Source.instances[0].listeners.ping();
+  await sync.fetchState();
+  assert(!messages.includes('Reconnecting…'));
+  now += 3000;
+  await sync.fetchState();
+  assert.equal(messages.at(-1), 'Reconnecting…');
 });

@@ -2,6 +2,7 @@ import {
   getConnectionId,
   requestJson,
   prefetchImages,
+  loadCachedMap,
   getStoredPlayerId,
   setStoredPlayerId,
 } from "./connection.js";
@@ -27,6 +28,7 @@ let reconnectDelay = 250;
 let reconnectTimer = null;
 let heartbeatBusy = false;
 let lastLobbyStream = 0;
+let lastLobbyHeartbeat = 0;
 let rejoining = false;
 let navigating = false;
 let roomRevision = -1;
@@ -160,14 +162,14 @@ const MAP_CACHE_URLS = ["/media/map_v2.jpg", "/media/ref_map_v2.jpg"];
 
 let stopMapPrefetch = () => {};
 function warmMapCache() {
-  if (!currentRoom && !document.hidden) stopMapPrefetch = prefetchImages(MAP_CACHE_URLS);
+  if (!document.hidden) stopMapPrefetch = prefetchImages(MAP_CACHE_URLS);
 }
 
 function ensureRefMapSrc() {
   const img = els.refOverlay?.querySelector("img");
   if (!img) return;
   const src = img.dataset.src || "/media/ref_map_v2.jpg";
-  if (img.getAttribute("src") !== src) img.src = src;
+  if (!img.getAttribute("src")) loadCachedMap(img, src);
 }
 
 // Background transfers start after the page's critical resources finish loading.
@@ -238,8 +240,8 @@ function setHostOnlyVisible() {
 
 function enterWaiting(data) {
   if (currentRoom !== data.room_id) roomRevision = -1;
-  stopMapPrefetch();
   currentRoom = data.room_id;
+  warmMapCache();
   selfPlayerId = els.playerId.value.trim();
   isHost = data.is_host;
   role = data.role;
@@ -284,7 +286,7 @@ function updateRoomUI(room) {
   const min = room.min_players;
   let text = "";
   if (status === "WAITING" && room.max_players === 1) {
-    text = "Solo ready. Choose your settings, then press Start Game Now.";
+    text = "Solo ready.";
   } else if (status === "WAITING" && n < min) {
     text = `Waiting for players… (need at least ${min})`;
   } else if (status === "WAITING") {
@@ -349,12 +351,16 @@ function lobbyEventUrl() {
 async function heartbeat() {
   if (!currentRoom || heartbeatBusy || document.hidden || navigating) return;
   heartbeatBusy = true;
+  const now = Date.now();
+  const delayed = now - lastLobbyHeartbeat > 3000;
+  lastLobbyHeartbeat = now;
   const roomId = currentRoom;
   try {
     const data = await post("/api/lobby/heartbeat", {
       room_id: roomId, player_id: selfPlayerId, connection_id: getConnectionId(),
     }, true);
     if (currentRoom !== roomId) return;
+    if (els.statusText.textContent === "Reconnecting…") els.statusBar.style.display = "none";
     if (data.present === false && !rejoining) {
       rejoining = true;
       try {
@@ -370,15 +376,19 @@ async function heartbeat() {
       updateRoomUI(data.room);
     }
   } catch (error) {
-    if (currentRoom === roomId) showError(error.code || "Reconnecting…");
+    if (currentRoom === roomId && (error.code || Date.now() - lastLobbyStream >= 3000)) {
+      showError(error.code || "Reconnecting…");
+    }
   } finally { heartbeatBusy = false; }
-  if (currentRoom && !navigating && Date.now() - lastLobbyStream > 3000) {
+  const streamBudget = evtSource?.readyState === 0 ? 5000 : 3000;
+  if (currentRoom && !navigating && !delayed && Date.now() - lastLobbyStream > streamBudget) {
     connectLobbySSE(lobbyEventUrl());
   }
 }
 
 function startHeartbeat() {
   clearInterval(heartbeatTimer);
+  lastLobbyHeartbeat = Date.now();
   heartbeatTimer = setInterval(heartbeat, 2000);
 }
 
@@ -449,7 +459,6 @@ els.scoringStrategy.addEventListener("change", () => {
 });
 
 async function joinRoom(solo = false) {
-  stopMapPrefetch();
   const player_id = els.playerId.value.trim() ||
     (solo ? `solo-${crypto.randomUUID().slice(0, 12)}` : "");
   els.playerId.value = player_id;
